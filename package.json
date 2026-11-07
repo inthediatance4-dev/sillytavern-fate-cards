@@ -7,7 +7,7 @@
         "node": ">=20"
     },
     "scripts": {
-        "test": "node --test tests/",
+        "test": "node --test",
         "build:plugins": "node scripts/build-standalone-plugins.mjs"
     },
     "dependencies": {
