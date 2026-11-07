@@ -333,6 +333,22 @@
 #director_fate_settings select { min-width: 0; max-width: 100%; }
 #director_fate_panel [hidden] { display: none; }
 
+/* 签筒：明签模式 */
+#director_fate_panel #director_fate_tube { display: flex; flex-direction: column; gap: 10px; }
+#director_fate_panel #director_fate_tube_luck { margin: 0; letter-spacing: 2px; }
+#director_fate_panel .director_fate_tube_actions { display: flex; gap: 8px; flex-wrap: wrap; }
+#director_fate_panel .director_fate_tube_actions .menu_button { min-height: 44px; }
+#director_fate_panel #director_fate_tube_list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.director_fate_tube_stick { display: flex; align-items: center; gap: 8px; padding: 8px;
+    border: 1px solid var(--SmartThemeBorderColor); border-radius: 8px; }
+.director_fate_tube_stick.is_rejected { opacity: 0.45; }
+.director_fate_tube_stick.is_adopted { border-color: var(--SmartThemeQuoteColor); }
+.director_fate_tube_stick .director_fate_tube_text { margin: 0; flex: 1; text-align: start; min-width: 0; }
+.director_fate_tube_stick_actions { display: flex; gap: 6px; flex: none; }
+.director_fate_tube_stick_actions .menu_button { min-height: 44px; min-width: 44px; }
+#director_fate_panel #director_fate_tube_hint,
+#director_fate_panel #director_fate_tube_status { margin: 0; }
+
 .director_fate_tabs {
     display: flex;
     gap: 8px;

@@ -56,6 +56,7 @@ let popover;
 let popper;
 let instructChip;
 let fatePanel;
+let fateApi;
 let executing = false;
 let chatRevision = 0;
 /** One regenerate's pre-interceptor delete. Not a sticky boolean. */
@@ -493,6 +494,7 @@ async function toggleChapterMark(messageId) {
             const current = getContext().chat[messageId];
             if (!current) return;
             markChapter(current, trimmed, uuidv4());
+            fateApi?.onChapterMarked?.();
         }
         applyChapterDividers();
         await getContext().saveChat();
@@ -587,11 +589,20 @@ export async function init() {
             seeded = true;
         }
     }
+    if (!settings.fate.tube || typeof settings.fate.tube !== 'object' || Array.isArray(settings.fate.tube)) {
+        settings.fate.tube = { enabled: true };
+        seeded = true;
+    }
+    if (typeof settings.fate.tube.enabled !== 'boolean') {
+        settings.fate.tube.enabled = true;
+        seeded = true;
+    }
     const context = getContext();
     const hasDraft = () => !!String(document.getElementById('send_textarea')?.value ?? '').trim() || hasPendingFileAttachment();
     let fateMarks;
     const fate = createFateController(getContext, {
         isGenerating, hasDraft, setSendButtonState, deactivateSendButtons, activateSendButtons, uuid:uuidv4, random:Math.random,
+        tubeEnabled: () => settings.fate.tube.enabled !== false,
         generate: current => current.generate('normal'),
         save: (_current, shouldSave) => getContext().saveChat({ shouldSave }),
         onRegenerateStart: () => setSendButtonState(true),
@@ -616,6 +627,7 @@ export async function init() {
             });
         },
     });
+    fateApi = fate;
     fateMarks = createFateMarks({
         getContext, getEntries: fate.log,
         onOpen: entryId => fatePanel.open({ tab: 'log', entryId }).catch(() => toastr.error('无法打开命运牌。')),

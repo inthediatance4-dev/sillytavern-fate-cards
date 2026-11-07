@@ -1,5 +1,8 @@
 import { messageFingerprint } from './instruct.js';
 import { ALL_TITLES, CATEGORIES, CATEGORY_IDS, RARITIES, findCategoryByTitle, rollOffer } from './fate-decks.js';
+import { TUBE_LUCK_MAX, TUBE_MESSAGE_WINDOW, TUBE_OUTPUT_TOKENS, TUBE_SCHEMA,
+    adoptTubeStick, collectRejectedTexts, createTubeState, excerptMessage, parseTubeResponse,
+    readTube, rejectTubeStick, shakeTube as shakeTubeState, tubeRequestPrompt } from './fate-tube.js';
 
 /** Legacy shared key is only cleaned up; new Fate prompts are request-local. */
 export const FATE_PROMPT_KEY = 'director_fate';
@@ -162,12 +165,12 @@ function readLog(value) {
 
 function state(metadata) {
     const value = metadata?.director?.fate;
-    if (value?.version !== 1) return { version: 1, held: null, bound: null, offer: null, pity: 0, recent: [], log: [], rerolls: 1 };
+    if (value?.version !== 1) return { version: 1, held: null, bound: null, offer: null, pity: 0, recent: [], log: [], rerolls: 1, tube: createTubeState() };
     const bound = readCard(value.bound);
     return {
         version: 1, held: readCard(value.held), offer: readOffer(value.offer), pity: readPity(value.pity), recent: readRecent(value.recent),
         bound: bound && Number.isInteger(bound.slotIndex) && bound.slotIndex >= 0 && typeof bound.prevFingerprint === 'string' ? bound : null,
-        log: readLog(value.log), rerolls: readRerolls(value.rerolls),
+        log: readLog(value.log), rerolls: readRerolls(value.rerolls), tube: readTube(value.tube),
     };
 }
 
@@ -224,6 +227,7 @@ export function createFateController(getContext, options = {}) {
         random = Math.random, generate = context => context.generate('normal'), onChange = () => {},
         save = context => context.saveMetadata(), setSendButtonState = () => {},
         deactivateSendButtons = () => {}, activateSendButtons = () => {}, onRegenerateStart = () => {},
+        tubeEnabled = () => true,
         onError = () => {}, onReveal = () => {} } = options;
     let revision = 0;
     let nonce = 0;
@@ -232,6 +236,7 @@ export function createFateController(getContext, options = {}) {
     let armed = null;
     let regenerateDelete = null;
     let groupScope = null;
+    let tubeBusy = null;
     const tokens = new Map();
     const requests = new WeakMap();
     const activeRequests = new Set();
@@ -269,7 +274,7 @@ export function createFateController(getContext, options = {}) {
             ? { ...publicReveal(value.bound), event: value.bound.event } : null;
         return { held: publicCard(value.held), bound: publicCard(value.bound), reveal, offer: publicOffer(value.offer),
             busy: Boolean(visibleBusy), phase: visibleBusy ? busy.phase : 'idle', logCount: value.log.length,
-            rerolls: value.rerolls };
+            rerolls: value.rerolls, tube: tubeView() };
     };
     const log = slotIndex => {
         const context = getContext();
@@ -331,7 +336,7 @@ export function createFateController(getContext, options = {}) {
     }
 
     function checkAvailable() {
-        if ((busy && current(busy.snapshot)) || isGenerating()) throw new Error('正在生成，请稍后重试。');
+        if ((busy && current(busy.snapshot)) || (tubeBusy && current(tubeBusy.snapshot)) || isGenerating()) throw new Error('正在生成，请稍后重试。');
         if (!getContext().chatMetadata || !Array.isArray(getContext().chat) || (!isGroup(getContext()) && getContext().characterId === undefined)) throw new Error('请先打开聊天。');
     }
 
@@ -443,6 +448,136 @@ export function createFateController(getContext, options = {}) {
     async function clearLog() {
         const context = getContext();
         return commit(capture(context), { ...state(context.chatMetadata), log: [] });
+    }
+
+    // ── 签筒（明签模式）───────────────────────────────────────────────
+    // Local tube actions commit small state changes; the tube request is the
+    // only model call and owns an abort controller, like every card operation.
+    function tubeView() {
+        if (!tubeEnabled()) return null;
+        const context = getContext();
+        const tube = state(context.chatMetadata).tube;
+        const requestBusy = tubeBusy && current(tubeBusy.snapshot);
+        const unseen = tube.pool.filter(stick => !tube.seenIds.includes(stick.id)).length;
+        const chatOpen = Boolean(context.chatMetadata) && Array.isArray(context.chat)
+            && (isGroup(context) || context.characterId !== undefined);
+        return {
+            luck: tube.luck, total: tube.pool.length, unseen, closed: tube.adoptedId !== null,
+            busy: Boolean(requestBusy), canRequest: chatOpen && !requestBusy && !busy && !isGenerating(),
+            canShake: tube.luck > 0 && unseen > 0 && !requestBusy && !busy,
+            seen: tube.pool.filter(stick => tube.seenIds.includes(stick.id)).map(stick => ({
+                id: stick.id, category: stick.category, rarity: stick.rarity, text: stick.text,
+                rejected: stick.rejected === true, adopted: tube.adoptedId === stick.id,
+            })),
+        };
+    }
+
+    function requireTube() {
+        if (!tubeEnabled()) throw new Error('签筒未启用。');
+        checkAvailable();
+    }
+
+    function abortTubeRequest() {
+        if (!tubeBusy) return;
+        tubeBusy.cancelled = true;
+        tubeBusy.controller.abort();
+        tubeBusy = null;
+    }
+
+    async function shake() {
+        requireTube();
+        const context = getContext();
+        const value = state(context.chatMetadata);
+        const result = shakeTubeState(value.tube, random);
+        if (!result) return null;
+        await commit(capture(context), { ...value, tube: result.tube });
+        return result.revealed;
+    }
+
+    async function rejectStick(id) {
+        requireTube();
+        const context = getContext();
+        const value = state(context.chatMetadata);
+        const tube = rejectTubeStick(value.tube, id);
+        if (!tube) return false;
+        await commit(capture(context), { ...value, tube });
+        return true;
+    }
+
+    // Adopting turns the stick into a held fate card, so apply(), prepare() and
+    // the whole bind/replay/mark chain run unchanged. The title comes from the
+    // stick's category, the only titles readCard() accepts.
+    async function adoptStick(id) {
+        requireTube();
+        const context = getContext();
+        const value = state(context.chatMetadata);
+        const tube = adoptTubeStick(value.tube, id);
+        if (!tube) throw new Error('这支签不能采用。');
+        if (value.held) throw new Error('先采用或弃掉手中的牌，再上签。');
+        const stick = tube.pool.find(item => item.id === id);
+        const card = { id: uuid(), title: categoryById.get(stick.category).titles[0], strength: 'medium',
+            event: stick.text, category: stick.category, rarity: stick.rarity };
+        await commit(capture(context), { ...value, held: card, tube });
+        return card;
+    }
+
+    async function requestTube() {
+        requireTube();
+        const context = getContext();
+        const rejected = collectRejectedTexts(state(context.chatMetadata).tube);
+        const recent = (Array.isArray(context.chat) ? context.chat : []).slice(-TUBE_MESSAGE_WINDOW)
+            .filter(message => message && (message.is_user === true || (message.is_user === false && !message.is_system))
+                && typeof message.mes === 'string' && message.mes.trim())
+            .map(message => ({ name: typeof message.name === 'string' && message.name ? message.name : message.is_user ? '玩家' : '角色',
+                text: excerptMessage(message.mes) }));
+        nonce++;
+        const snapshot = capture(context);
+        const operation = tubeBusy = { snapshot, controller: new AbortController(), cancelled: false };
+        notify();
+        try {
+            const raw = await snapshot.context.generateQuietPrompt({
+                isolated: true, jsonSchema: TUBE_SCHEMA, maxOutputTokens: TUBE_OUTPUT_TOKENS,
+                signal: operation.controller.signal,
+                quietPrompt: tubeRequestPrompt({ messages: recent, rejected }),
+            });
+            if (!current(snapshot) || operation.cancelled) return false;
+            const pool = parseTubeResponse(raw).map(stick => ({ ...stick, id: uuid() }));
+            // Luck may have accrued while the request was in flight.
+            const value = state(snapshot.metadata);
+            return await commit(snapshot, { ...value, tube: { ...createTubeState({ luck: value.tube.luck }), pool } });
+        } catch (error) {
+            if (!current(snapshot) || operation.cancelled) return false;
+            throw error?.name === 'AbortError' ? new Error('求签被取消。') : new Error('求签失败，请稍后再试。');
+        } finally {
+            if (tubeBusy === operation) { tubeBusy = null; if (current(snapshot)) notify(); }
+        }
+    }
+
+    // Every completed normal/swipe reply refills one luck; regenerate and
+    // continue replace or extend an existing message and count for nothing.
+    // Runs inside the shared completion handler so a fate bind built in the
+    // same event already includes the gain instead of clobbering it.
+    function accrueTubeLuck(type, chatId, chatMetadata) {
+        if (!tubeEnabled() || (type !== 'normal' && type !== 'swipe')) return;
+        const context = getContext();
+        if (chatMetadata !== context.chatMetadata || chatId !== context.chatId
+            || chatMetadata?.director?.fate?.version !== 1) return;
+        const value = state(chatMetadata);
+        if (value.tube.luck >= TUBE_LUCK_MAX) return;
+        chatMetadata.director.fate = { ...value, tube: { ...value.tube, luck: value.tube.luck + 1 } };
+        notify();
+        context.saveMetadataDebounced?.();
+    }
+
+    // A freshly marked chapter resets the luck meter; removing a mark does not.
+    function onChapterMarked() {
+        if (!tubeEnabled()) return;
+        const context = getContext();
+        const value = state(context.chatMetadata);
+        if (value.tube.luck === TUBE_LUCK_MAX) return;
+        context.chatMetadata.director.fate = { ...value, tube: { ...value.tube, luck: TUBE_LUCK_MAX } };
+        notify();
+        context.saveMetadataDebounced?.();
     }
 
     // User actions only. Opening the log and jumping ask for this; message
@@ -584,6 +719,7 @@ export function createFateController(getContext, options = {}) {
         clearPrompt();
         revision++;
         nonce++;
+        abortTubeRequest();
         busy = armed = regenerateDelete = groupScope = null;
         tokens.clear();
         activeRequests.clear();
@@ -592,6 +728,7 @@ export function createFateController(getContext, options = {}) {
     on('GENERATION_STARTED', async (type, _params, dryRun) => {
         if (dryRun) return;
         if (type === 'quiet' || type === 'impersonate') return retrySave();
+        abortTubeRequest();
         clearPrompt();
         for (const record of activeRequests) record.invalid = true;
         activeRequests.clear();
@@ -629,6 +766,7 @@ export function createFateController(getContext, options = {}) {
         if (!dryRun) clearPrompt();
     });
     on('GENERATION_COMPLETED', async ({ data, type, chatId, chatMetadata }) => {
+        accrueTubeLuck(type, chatId, chatMetadata);
         const record = requests.get(data);
         requests.delete(data);
         activeRequests.delete(record);
@@ -678,6 +816,7 @@ export function createFateController(getContext, options = {}) {
     const finish = stopped => {
         clearPrompt();
         regenerateDelete = null;
+        if (stopped) abortTubeRequest();
         if (stopped) {
             for (const record of tokens.values()) record.invalid = true;
             for (const record of activeRequests) record.invalid = true;
@@ -747,5 +886,6 @@ export function createFateController(getContext, options = {}) {
         groupScope = null;
         clearPrompt();
     });
-    return { view, log, recoverLog, clearLog, draw, deal, pick, discard, apply, prepare };
+    return { view, log, recoverLog, clearLog, draw, deal, pick, discard, apply, prepare,
+        shake, rejectStick, adoptStick, requestTube, onChapterMarked };
 }

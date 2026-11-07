@@ -124,7 +124,7 @@ const entry = (id, fields = {}) => ({
     replays: 0, status: 'ok', ...fields,
 });
 
-function lab(t, { entries = [entry('first')], reveal = 'tap', motion = 'system' } = {}) {
+function lab(t, { entries = [entry('first')], reveal = 'tap', motion = 'system', tube = false, tubeActions = {} } = {}) {
     const previous = Object.fromEntries(['document', 'Element', 'Node', 'Option', 'MutationObserver'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
     const html = new Element('html');
     const body = new Element('body');
@@ -191,11 +191,13 @@ function lab(t, { entries = [entry('first')], reveal = 'tap', motion = 'system' 
     const sounds = [];
     const jumps = [];
     const warnings = [];
-    const settings = { reveal, motion, sound: false };
+    const settings = { reveal, motion, sound: false, tube: { enabled: tube } };
     const controller = {
         view: () => ({ ...view, logCount: logs.length }),
         log: () => logs.map(value => ({ ...value })),
         async clearLog() { clears++; logs = []; },
+        shake: tubeActions.shake, requestTube: tubeActions.request,
+        adoptStick: tubeActions.adopt, rejectStick: tubeActions.reject,
     };
     const panel = createFatePanel(controller, {
         Popup, POPUP_TYPE: { TEXT: 'text' }, POPUP_RESULT: { AFFIRMATIVE: 1 }, hasDraft: () => false,
@@ -640,5 +642,105 @@ test('the draw button shows one free swap, then locks with a hint until the offe
     assert.equal(draw.getAttribute('title'), null);
     assert.equal(draw.getAttribute('aria-label'), null);
     assert.equal(fixture.query('#director_fate_status').textContent, '抽取一张牌，让故事迎来转折。');
+    await fixture.close();
+});
+
+const tubeData = {
+    luck: 6, total: 12, unseen: 6, closed: false, busy: false, canRequest: true, canShake: true,
+    seen: [
+        { id: 's0', category: 'echo', rarity: 'rare', text: '雨夜困在地下通道', rejected: false, adopted: false },
+        { id: 's1', category: 'gift', rarity: 'common', text: '有人送来一封旧信', rejected: true, adopted: false },
+    ],
+};
+
+test('the tube tab joins the tab order with full a11y wiring when enabled', async t => {
+    const fixture = lab(t, { tube: true });
+    fixture.setView({ tube: { ...tubeData } });
+    fixture.open();
+    const tubeTab = fixture.query('#director_fate_tab_tube');
+    const current = fixture.query('#director_fate_tab_current');
+    const log = fixture.query('#director_fate_tab_log');
+    assert.equal(tubeTab.getAttribute('role'), 'tab');
+    assert.equal(tubeTab.hidden, false);
+    assert.equal(tubeTab.textContent, '签筒');
+    const pane = fixture.query(`#${tubeTab.getAttribute('aria-controls')}`);
+    assert.equal(pane.getAttribute('role'), 'tabpanel');
+    assert.equal(pane.getAttribute('aria-labelledby'), 'director_fate_tab_tube');
+    for (const [from, key, to] of [[current, 'ArrowRight', tubeTab], [tubeTab, 'ArrowRight', log],
+        [log, 'ArrowLeft', tubeTab], [current, 'End', log], [log, 'Home', current]]) {
+        from.fire('keydown', { key });
+        assert.equal(to.getAttribute('aria-selected'), 'true', `${key} from ${from.id}`);
+    }
+    await fixture.close();
+});
+
+test('the tube pane renders luck, gates buttons and lists seen sticks', async t => {
+    const fixture = lab(t, { tube: true });
+    fixture.setView({ tube: { ...tubeData } });
+    fixture.open();
+    assert.equal(fixture.query('#director_fate_tube_luck').textContent, '运气 ●●●●●●○○○○');
+    assert.equal(fixture.query('#director_fate_tube_request').textContent, '再求一筒', 'an existing tube offers a refill');
+    assert.equal(fixture.query('#director_fate_tube_shake').disabled, false);
+    fixture.setView({ tube: { ...tubeData, total: 0, unseen: 0, seen: [], canShake: false } });
+    assert.equal(fixture.query('#director_fate_tube_request').textContent, '求一筒', 'an empty tube invites the first request');
+    assert.ok(fixture.query('#director_fate_tube_hint').textContent.includes('还没有签'));
+    fixture.setView({ tube: { ...tubeData } });
+    const list = fixture.query('#director_fate_tube_list');
+    assert.equal(list.children.length, 2);
+    const [kept, rejected] = list.children;
+    assert.equal(kept.dataset.stickId, 's0');
+    assert.ok(kept.textContent.includes('雨夜困在地下通道'));
+    assert.equal(kept.querySelectorAll('button').length, 2, '上签 and 不要 are available');
+    assert.equal(rejected.classList.contains('is_rejected'), true);
+    assert.equal(rejected.querySelectorAll('button').length, 0, 'rejected sticks expose no buttons');
+    assert.ok(fixture.query('#director_fate_tube_hint').textContent.includes('6 支'));
+    fixture.setView({ tube: { ...tubeData, luck: 0, canShake: false } });
+    const shake = fixture.query('#director_fate_tube_shake');
+    assert.equal(shake.disabled, true);
+    assert.equal(shake.getAttribute('title'), '运不足——先让故事走一步');
+    fixture.setView({ tube: { ...tubeData, unseen: 0, canShake: false, closed: true, seen: tubeData.seen.map(stick => ({ ...stick, adopted: stick.id === 's0' })) } });
+    assert.equal(fixture.query('#director_fate_tube_request').textContent, '再求一筒');
+    assert.ok(fixture.query('#director_fate_tube_hint').textContent.includes('作废'));
+    await fixture.close();
+});
+
+test('tube buttons call the controller: shake, request, adopt and reject', async t => {
+    const calls = [];
+    const fixture = lab(t, {
+        tube: true,
+        tubeActions: {
+            shake: () => { calls.push('shake'); return []; },
+            request: () => { calls.push('request'); return true; },
+            adopt: id => { calls.push(`adopt:${id}`); return {}; },
+            reject: id => { calls.push(`reject:${id}`); return true; },
+        },
+    });
+    fixture.setView({ tube: { ...tubeData } });
+    fixture.open();
+    fixture.query('#director_fate_tube_shake').click();
+    fixture.query('#director_fate_tube_request').click();
+    const buttons = fixture.query('#director_fate_tube_list').children[0].querySelectorAll('button');
+    buttons[0].click();
+    buttons[1].click();
+    await settle();
+    assert.deepEqual(calls, ['shake', 'request', 'adopt:s0', 'reject:s0']);
+    assert.ok(fixture.sounds.includes('draw'), 'shaking plays the draw sound');
+    assert.ok(fixture.sounds.includes('seal'), 'adopting plays the seal sound');
+    await fixture.close();
+});
+
+test('the tube toggle lives in preferences and hides the tab when disabled', async t => {
+    const fixture = lab(t, { tube: true });
+    fixture.setView({ tube: { ...tubeData } });
+    fixture.open();
+    const toggle = fixture.query('#director_fate_tube_enabled');
+    assert.equal(toggle.checked, true);
+    toggle.checked = false;
+    toggle.fire('change');
+    assert.equal(fixture.settings.tube.enabled, false);
+    assert.equal(fixture.query('#director_fate_tab_tube').hidden, true);
+    toggle.checked = true;
+    toggle.fire('change');
+    assert.equal(fixture.query('#director_fate_tab_tube').hidden, false);
     await fixture.close();
 });

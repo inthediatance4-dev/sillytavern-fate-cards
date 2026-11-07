@@ -12,7 +12,7 @@ const SOURCE_EXTENSIONS = new Set(['.js', '.json', '.html', '.css']);
 const PLUGINS = [
     {
         id: 'director', folderName: 'st-director-fate-cards', displayName: '命运之牌',
-        files: ['chapters.js', 'fate-decks.js', 'fate-marks.js', 'fate-sound.js', 'fate-ui.js', 'fate.js', 'index.js', 'instruct.js', 'manager.js', 'presets.js', 'template.js', 'manifest.json', 'settings.html', 'style.css'],
+        files: ['chapters.js', 'fate-decks.js', 'fate-marks.js', 'fate-sound.js', 'fate-tube.js', 'fate-ui.js', 'fate.js', 'index.js', 'instruct.js', 'manager.js', 'presets.js', 'template.js', 'manifest.json', 'settings.html', 'style.css'],
     },
 ];
 const sha256 = value => createHash('sha256').update(value).digest('hex');

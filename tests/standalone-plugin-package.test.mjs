@@ -11,7 +11,7 @@ const repository = fileURLToPath(new URL('../', import.meta.url));
 const builderUrl = new URL('../scripts/build-standalone-plugins.mjs', import.meta.url);
 const evidence = path.join(repository, '.evidence', 'standalone-plugins', 'package-tests');
 const sourceFiles = {
-    director: ['chapters.js', 'fate-decks.js', 'fate-marks.js', 'fate-sound.js', 'fate-ui.js', 'fate.js', 'index.js', 'instruct.js', 'manager.js', 'presets.js', 'template.js', 'manifest.json', 'settings.html', 'style.css'],
+    director: ['chapters.js', 'fate-decks.js', 'fate-marks.js', 'fate-sound.js', 'fate-tube.js', 'fate-ui.js', 'fate.js', 'index.js', 'instruct.js', 'manager.js', 'presets.js', 'template.js', 'manifest.json', 'settings.html', 'style.css'],
 };
 const digest = value => createHash('sha256').update(value).digest('hex');
 

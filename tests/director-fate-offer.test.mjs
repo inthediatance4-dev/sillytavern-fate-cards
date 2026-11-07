@@ -662,7 +662,7 @@ test('deal, view and panel refresh do not traverse a 2000-message chat', async t
     }
     panel = createFatePanel(controller, {
         Popup, POPUP_TYPE: { TEXT: 'text' }, POPUP_RESULT: { AFFIRMATIVE: 1 },
-        hasDraft: () => false, warn() {}, settings: { reveal: 'tap', sound: false, motion: 'system' },
+        hasDraft: () => false, warn() {}, settings: { reveal: 'tap', sound: false, motion: 'system', tube: { enabled: false } },
         sound: { play() {} }, saveSettings() {}, restoreFocus() {},
     });
     const opening = panel.open();

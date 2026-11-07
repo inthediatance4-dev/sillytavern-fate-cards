@@ -33,11 +33,19 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
         return rarities[id] ?? rarities.common;
     }
 
+    function tabOrder() {
+        const order = ['current'];
+        if (panel.querySelector('#director_fate_tab_tube')) order.push('tube');
+        order.push('log');
+        return order;
+    }
+
     function selectTab(tab, focus = false) {
-        const next = tab === 'log' ? 'log' : 'current';
+        const order = tabOrder();
+        const next = order.includes(tab) ? tab : 'current';
         const changed = next !== activeTab;
         activeTab = next;
-        for (const name of ['current', 'log']) {
+        for (const name of order) {
             const selected = name === activeTab;
             const control = panel.querySelector(`#director_fate_tab_${name}`);
             control.setAttribute('aria-selected', String(selected));
@@ -275,6 +283,67 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
         }
     }
 
+    function syncTube(tube) {
+        const tab = panel.querySelector('#director_fate_tab_tube');
+        const pane = panel.querySelector('#director_fate_tube');
+        if (!tab || !pane) return;
+        const enabled = Boolean(tube) && settings.tube?.enabled !== false;
+        tab.hidden = !enabled;
+        if (!enabled) {
+            if (activeTab === 'tube') selectTab('current');
+            return;
+        }
+        panel.querySelector('#director_fate_tube_luck').textContent =
+            `运气 ${'●'.repeat(tube.luck)}${'○'.repeat(Math.max(0, 10 - tube.luck))}`;
+        const shake = panel.querySelector('#director_fate_tube_shake');
+        shake.disabled = !tube.canShake;
+        if (tube.total > 0 && tube.unseen === 0) shake.setAttribute('title', '这筒签已全部摇出');
+        else if (tube.luck < 1) shake.setAttribute('title', '运不足——先让故事走一步');
+        else shake.removeAttribute('title');
+        const request = panel.querySelector('#director_fate_tube_request');
+        request.disabled = !tube.canRequest;
+        request.textContent = tube.busy ? '求签中…' : tube.total ? '再求一筒' : '求一筒';
+        const list = panel.querySelector('#director_fate_tube_list');
+        const seenKeys = tube.seen.map(stick => `${stick.id}:${stick.rejected ? 'r' : ''}:${stick.adopted ? 'a' : ''}`).join('|');
+        if (list.dataset.keys !== seenKeys) {
+            list.dataset.keys = seenKeys;
+            list.replaceChildren();
+            for (const stick of tube.seen) {
+                const item = document.createElement('li');
+                item.className = 'director_fate_tube_stick';
+                item.dataset.stickId = stick.id;
+                if (stick.rejected) item.classList.add('is_rejected');
+                if (stick.adopted) item.classList.add('is_adopted');
+                const dot = document.createElement('span');
+                dot.className = 'director_fate_rarity_dot';
+                dot.dataset.rarity = stick.rarity;
+                const text = document.createElement('p');
+                text.className = 'director_fate_tube_text';
+                text.textContent = stick.text;
+                const stickActions = document.createElement('div');
+                stickActions.className = 'director_fate_tube_stick_actions';
+                if (!stick.rejected && !stick.adopted && !tube.closed) {
+                    const adopt = button('', '上签', () => {
+                        sound.play('seal');
+                        action(async () => {
+                            await controller.adoptStick(stick.id);
+                            selectTab('current');
+                        }, '未能上签，请重试。');
+                    });
+                    const reject = button('', '不要', () => action(() => controller.rejectStick(stick.id), '未能拒签，请重试。'));
+                    stickActions.append(adopt, reject);
+                }
+                item.append(dot, text, stickActions);
+                list.append(item);
+            }
+        }
+        panel.querySelector('#director_fate_tube_hint').textContent = tube.total === 0
+            ? '还没有签。点「求一筒」，用当前的模型连接求 12 支明签。'
+            : tube.closed ? '这筒已上了一支签；其余的签随它作废，求新筒另起一筒。'
+                : `筒中还有 ${tube.unseen} 支没摇出。`;
+        panel.querySelector('#director_fate_tube_status').textContent = tube.busy ? '正在为这段剧情求签…' : '';
+    }
+
     function refresh() {
         if (!panel) return;
         const view = controller.view();
@@ -319,6 +388,7 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
         syncDraw(view);
         panel.setAttribute('aria-busy', String(view.busy));
         syncLog(view);
+        syncTube(view.tube);
         selectTab(activeTab);
         if (activeTab === 'log') queueLogRecovery();
     }
@@ -374,7 +444,7 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
         tabs.className = 'director_fate_tabs';
         tabs.setAttribute('role', 'tablist');
         tabs.setAttribute('aria-label', '命运牌');
-        for (const [name, text] of [['current', '当前'], ['log', '本局命运（0）']]) {
+        for (const [name, text] of [['current', '当前'], ...(settings.tube?.enabled !== false ? [['tube', '签筒']] : []), ['log', '本局命运（0）']]) {
             const control = button(`director_fate_tab_${name}`, text, () => selectTab(name));
             // Core a11y turns .menu_button into role="button"; tabs keep their own styling.
             control.className = 'director_fate_tab';
@@ -383,7 +453,10 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
             control.addEventListener('keydown', event => {
                 if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
                 event.preventDefault();
-                const next = event.key === 'Home' ? 'current' : event.key === 'End' ? 'log' : name === 'current' ? 'log' : 'current';
+                const order = tabOrder();
+                const at = order.indexOf(name);
+                const next = event.key === 'Home' ? order[0] : event.key === 'End' ? order.at(-1)
+                    : event.key === 'ArrowRight' ? order[(at + 1) % order.length] : order[(at - 1 + order.length) % order.length];
                 selectTab(next, true);
             });
             tabs.append(control);
@@ -488,6 +561,31 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
             await controller.clearLog();
         }, '未能清空记录，请重试。'));
         log.append(logList, empty, clear);
+        const tubePane = document.createElement('div');
+        tubePane.id = 'director_fate_tube';
+        tubePane.setAttribute('role', 'tabpanel');
+        tubePane.setAttribute('aria-labelledby', 'director_fate_tab_tube');
+        const tubeLuck = document.createElement('p');
+        tubeLuck.id = 'director_fate_tube_luck';
+        const tubeControls = document.createElement('div');
+        tubeControls.className = 'director_fate_tube_actions';
+        const tubeShake = button('director_fate_tube_shake', '摇一摇', () => {
+            sound.play('draw');
+            action(() => controller.shake(), '未能摇签，请重试。');
+        });
+        const tubeRequest = button('director_fate_tube_request', '求一筒', () => action(() => controller.requestTube(), '求签失败，请重试。'));
+        tubeControls.append(tubeShake, tubeRequest);
+        const tubeList = document.createElement('ol');
+        tubeList.id = 'director_fate_tube_list';
+        const tubeHint = document.createElement('p');
+        tubeHint.id = 'director_fate_tube_hint';
+        const tubeStatus = document.createElement('p');
+        tubeStatus.id = 'director_fate_tube_status';
+        tubeStatus.setAttribute('role', 'status');
+        tubeStatus.setAttribute('aria-live', 'polite');
+        const tubeCost = document.createElement('small');
+        tubeCost.textContent = '求一筒调用一次当前连接，写出一筒 12 支明签；摇签不连模型，每摇一次消耗 1 点运。每条新回复 +1 运，标记新章节时回满。一筒只可上一支签。';
+        tubePane.append(tubeLuck, tubeControls, tubeList, tubeHint, tubeStatus, tubeCost);
         const preferences = document.createElement('div');
         preferences.id = 'director_fate_settings';
         preferences.hidden = true;
@@ -511,7 +609,18 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
             });
             preferences.append(labelFor(control, text), control);
         }
-        panel.append(heading, tabs, current, log, gear, preferences);
+        const tubeToggle = document.createElement('input');
+        tubeToggle.id = 'director_fate_tube_enabled';
+        tubeToggle.type = 'checkbox';
+        tubeToggle.checked = settings.tube?.enabled !== false;
+        preferences.append(labelFor(tubeToggle, '签筒（明签）'), tubeToggle);
+        tubeToggle.addEventListener('change', () => {
+            settings.tube = { ...(settings.tube ?? { enabled: true }), enabled: tubeToggle.checked };
+            saveSettings();
+            refresh();
+        });
+
+        panel.append(heading, tabs, current, tubePane, log, gear, preferences);
         // The dialog focuses its autofocus control inside showModal. onOpen runs
         // only after the opening animation, which is too late for a caller that
         // reads document.activeElement as soon as the panel is visible.
