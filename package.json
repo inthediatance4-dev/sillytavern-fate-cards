@@ -1,0 +1,19 @@
+{
+    "name": "sillytavern-fate-cards",
+    "private": true,
+    "type": "module",
+    "description": "命运之牌 —— 独立 SillyTavern 前端扩展：剧情预设、盲抽命运牌、章节标记，以及规划中的明签签筒",
+    "engines": {
+        "node": ">=20"
+    },
+    "scripts": {
+        "test": "node --test tests/",
+        "build:plugins": "node scripts/build-standalone-plugins.mjs"
+    },
+    "dependencies": {
+        "@adobe/css-tools": "^4.4.4",
+        "fflate": "^0.8.2",
+        "parse5": "^7.3.0",
+        "typescript": "^5.9.3"
+    }
+}
