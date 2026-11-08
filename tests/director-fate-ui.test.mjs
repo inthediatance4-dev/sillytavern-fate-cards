@@ -27,6 +27,7 @@ class Element {
         };
         this.hidden = false;
         this.disabled = false;
+        this.style = {};
         this.text = '';
     }
     set id(value) { this.setAttribute('id', value); }
@@ -678,7 +679,13 @@ test('the tube pane renders luck, gates buttons and lists seen sticks', async t 
     const fixture = lab(t, { tube: true });
     fixture.setView({ tube: { ...tubeData } });
     fixture.open();
-    assert.equal(fixture.query('#director_fate_tube_luck').textContent, '运气 ●●●●●●○○○○');
+    const meter = fixture.query('#director_fate_tube_luck_meter');
+    assert.equal(meter.getAttribute('role'), 'meter');
+    assert.equal(meter.getAttribute('aria-valuenow'), '6');
+    assert.equal(meter.getAttribute('aria-valuetext'), '6 / 10');
+    assert.equal(meter.style.width, undefined);
+    assert.equal(meter.querySelector('.director_fate_tube_luck_fill').style.width, '60%');
+    assert.equal(fixture.query('#director_fate_tube_luck_value').textContent, '6/10');
     assert.equal(fixture.query('#director_fate_tube_request').textContent, '再求一筒', 'an existing tube offers a refill');
     assert.equal(fixture.query('#director_fate_tube_shake').disabled, false);
     fixture.setView({ tube: { ...tubeData, total: 0, unseen: 0, seen: [], canShake: false } });
@@ -698,6 +705,8 @@ test('the tube pane renders luck, gates buttons and lists seen sticks', async t 
     const shake = fixture.query('#director_fate_tube_shake');
     assert.equal(shake.disabled, true);
     assert.equal(shake.getAttribute('title'), '运不足——先让故事走一步');
+    assert.equal(fixture.query('#director_fate_tube_luck_meter').getAttribute('aria-valuenow'), '0');
+    assert.equal(fixture.query('#director_fate_tube_luck_meter .director_fate_tube_luck_fill').style.width, '0%');
     fixture.setView({ tube: { ...tubeData, unseen: 0, canShake: false, closed: true, seen: tubeData.seen.map(stick => ({ ...stick, adopted: stick.id === 's0' })) } });
     assert.equal(fixture.query('#director_fate_tube_request').textContent, '再求一筒');
     assert.ok(fixture.query('#director_fate_tube_hint').textContent.includes('作废'));

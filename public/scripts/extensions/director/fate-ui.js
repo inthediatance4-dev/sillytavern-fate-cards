@@ -287,14 +287,24 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
         const tab = panel.querySelector('#director_fate_tab_tube');
         const pane = panel.querySelector('#director_fate_tube');
         if (!tab || !pane) return;
-        const enabled = Boolean(tube) && settings.tube?.enabled !== false;
+        // undefined means the caller's view stub has no tube data; only an
+        // explicit null (controller disabled) or the setting hides the tab.
+        const enabled = tube !== null && tube !== undefined && settings.tube?.enabled !== false;
         tab.hidden = !enabled;
         if (!enabled) {
             if (activeTab === 'tube') selectTab('current');
             return;
         }
-        panel.querySelector('#director_fate_tube_luck').textContent =
-            `运气 ${'●'.repeat(tube.luck)}${'○'.repeat(Math.max(0, 10 - tube.luck))}`;
+        const luckMeter = panel.querySelector('#director_fate_tube_luck_meter');
+        if (luckMeter) {
+            luckMeter.setAttribute('aria-valuenow', String(tube.luck));
+            luckMeter.setAttribute('aria-valuetext', `${tube.luck} / 10`);
+            luckMeter.classList.toggle('is_full', tube.luck >= 10);
+            luckMeter.querySelector('.director_fate_tube_luck_fill').style.width = `${tube.luck * 10}%`;
+        }
+        const luckNow = panel.querySelector('#director_fate_tube_luck_now');
+        if (luckNow) luckNow.textContent = String(tube.luck);
+
         const shake = panel.querySelector('#director_fate_tube_shake');
         shake.disabled = !tube.canShake;
         if (tube.total > 0 && tube.unseen === 0) shake.setAttribute('title', '这筒签已全部摇出');
@@ -565,8 +575,34 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
         tubePane.id = 'director_fate_tube';
         tubePane.setAttribute('role', 'tabpanel');
         tubePane.setAttribute('aria-labelledby', 'director_fate_tab_tube');
-        const tubeLuck = document.createElement('p');
+        const tubeLuck = document.createElement('div');
+        tubeLuck.className = 'director_fate_tube_luck_row';
         tubeLuck.id = 'director_fate_tube_luck';
+        const tubeLuckLabel = document.createElement('span');
+        tubeLuckLabel.className = 'director_fate_tube_luck_label';
+        tubeLuckLabel.textContent = '运';
+        const tubeLuckMeter = document.createElement('div');
+        tubeLuckMeter.className = 'director_fate_tube_luck_meter';
+        tubeLuckMeter.id = 'director_fate_tube_luck_meter';
+        tubeLuckMeter.setAttribute('role', 'meter');
+        tubeLuckMeter.setAttribute('aria-label', '运势');
+        tubeLuckMeter.setAttribute('aria-valuemin', '0');
+        tubeLuckMeter.setAttribute('aria-valuemax', '10');
+        const tubeLuckFill = document.createElement('div');
+        tubeLuckFill.className = 'director_fate_tube_luck_fill';
+        const tubeLuckNotches = document.createElement('div');
+        tubeLuckNotches.className = 'director_fate_tube_luck_notches';
+        tubeLuckMeter.append(tubeLuckFill, tubeLuckNotches);
+        const tubeLuckValue = document.createElement('span');
+        tubeLuckValue.className = 'director_fate_tube_luck_value';
+        tubeLuckValue.id = 'director_fate_tube_luck_value';
+        const tubeLuckNow = document.createElement('span');
+        tubeLuckNow.id = 'director_fate_tube_luck_now';
+        const tubeLuckMax = document.createElement('span');
+        tubeLuckMax.className = 'director_fate_tube_luck_max';
+        tubeLuckMax.textContent = '/10';
+        tubeLuckValue.append(tubeLuckNow, tubeLuckMax);
+        tubeLuck.append(tubeLuckLabel, tubeLuckMeter, tubeLuckValue);
         const tubeControls = document.createElement('div');
         tubeControls.className = 'director_fate_tube_actions';
         const tubeShake = button('director_fate_tube_shake', '摇一摇', () => {

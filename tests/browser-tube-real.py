@@ -242,9 +242,9 @@ def main():
             marks = page.locator('#chat .director_fate_mark, #chat .director_fate_emblem').count()
             page.click('#director_fate_tab_tube')
             page.wait_for_timeout(400)
-            luck_final = page.locator('#director_fate_tube_luck').inner_text()
+            luck_final = page.locator('#director_fate_tube_luck_meter').get_attribute('aria-valuenow')
             step('bind-evidence', log_entries >= 1, f'log={log_entries} marks={marks}')
-            step('luck-refill', luck_final.count('●') == 10, luck_final)
+            step('luck-refill', luck_final == '10', f'aria-valuenow={luck_final}')
             shoot('08-verified')
 
             # ── 第二轮：上签后的旧筒已作废 → 求新筒（真实调用 #2）→ 摇 → 拒签 → 再求（真实调用 #3）→ 摇光整筒核对负面清单 ──
