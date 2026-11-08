@@ -194,6 +194,7 @@ test('adopting a seen stick turns it into the held fate card and closes the tube
     assert.equal(fixture.tubeState.adoptedId, first.id);
     assert.equal(fixture.controller.view().tube.closed, true);
     await assert.rejects(fixture.controller.adoptStick(fixture.controller.view().tube.seen[1].id), /不能采用/, 'one adoption closes the tube');
+    assert.equal(await fixture.controller.shake(), null, 'a closed tube refuses further shakes');
     assert.equal(fixture.controller.view().held.id, card.id, 'the stick rides the normal held flow');
 });
 

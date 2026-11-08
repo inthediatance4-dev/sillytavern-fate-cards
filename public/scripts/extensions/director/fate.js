@@ -464,7 +464,7 @@ export function createFateController(getContext, options = {}) {
         return {
             luck: tube.luck, total: tube.pool.length, unseen, closed: tube.adoptedId !== null,
             busy: Boolean(requestBusy), canRequest: chatOpen && !requestBusy && !busy && !isGenerating(),
-            canShake: tube.luck > 0 && unseen > 0 && !requestBusy && !busy,
+            canShake: tube.luck > 0 && unseen > 0 && tube.adoptedId === null && !requestBusy && !busy,
             seen: tube.pool.filter(stick => tube.seenIds.includes(stick.id)).map(stick => ({
                 id: stick.id, category: stick.category, rarity: stick.rarity, text: stick.text,
                 rejected: stick.rejected === true, adopted: tube.adoptedId === stick.id,
@@ -488,6 +488,7 @@ export function createFateController(getContext, options = {}) {
         requireTube();
         const context = getContext();
         const value = state(context.chatMetadata);
+        if (value.tube.adoptedId !== null) return null; // 一筒只出一次手：上签后余签作废。
         const result = shakeTubeState(value.tube, random);
         if (!result) return null;
         await commit(capture(context), { ...value, tube: result.tube });
