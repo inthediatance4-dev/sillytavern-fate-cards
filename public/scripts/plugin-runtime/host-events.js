@@ -190,7 +190,9 @@ export function createHostEventBridge(getContext, core, groups, options = {}) {
         if (groupRunning) return;
         const context = getContext();
         const owner = ownerOf(context);
-        const marker = { generationId: context.chat.at(-1)?.extra?.gen_id ?? null, cancelled: false };
+        const last = context.chat?.at(-1);
+        const generationId = last && !last.is_user && !last.is_system ? last.extra?.gen_id ?? null : null;
+        const marker = { groupId: owner.groupId, chatId: owner.chatId, generationId, cancelled: false };
         groupRunning = true;
         try {
             await events.emit(eventTypes.GROUP_REGENERATION_STARTED, marker);

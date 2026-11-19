@@ -753,3 +753,105 @@ test('the tube toggle lives in preferences and hides the tab when disabled', asy
     assert.equal(fixture.query('#director_fate_tab_tube').hidden, false);
     await fixture.close();
 });
+
+test('tube toggle works from initially disabled state, hides pane and skips disabled tab on keyboard navigation', async t => {
+    const fixture = lab(t, { tube: false });
+    fixture.setView({ tube: { ...tubeData } });
+    fixture.open({ tab: 'tube' });
+    const current = fixture.query('#director_fate_tab_current');
+    const tubeTab = fixture.query('#director_fate_tab_tube');
+    const tubePane = fixture.query('#director_fate_tube');
+    const log = fixture.query('#director_fate_tab_log');
+    assert.equal(tubeTab.hidden, true);
+    assert.equal(tubePane.hidden, true);
+    assert.equal(current.getAttribute('aria-selected'), 'true', 'opening tube while disabled falls back to current');
+
+    // Turning tube ON while panel is open immediately reveals the tab.
+    const toggle = fixture.query('#director_fate_tube_enabled');
+    assert.equal(toggle.checked, false);
+    toggle.checked = true;
+    toggle.fire('change');
+    assert.equal(tubeTab.hidden, false);
+    tubeTab.click();
+    assert.equal(tubeTab.getAttribute('aria-selected'), 'true');
+    assert.equal(tubePane.hidden, false);
+
+    // Turning tube OFF while on the tube tab hides both tab and pane and skips it in ArrowRight.
+    toggle.checked = false;
+    toggle.fire('change');
+    assert.equal(tubeTab.hidden, true);
+    assert.equal(tubePane.hidden, true);
+    assert.equal(current.getAttribute('aria-selected'), 'true');
+    current.fire('keydown', { key: 'ArrowRight' });
+    assert.equal(log.getAttribute('aria-selected'), 'true', 'keyboard navigation skips the hidden tube tab');
+    await fixture.close();
+
+    // Opening directly on the tube tab works when enabled.
+    fixture.settings.tube.enabled = true;
+    fixture.open({ tab: 'tube' });
+    assert.equal(fixture.query('#director_fate_tab_tube').getAttribute('aria-selected'), 'true');
+    assert.equal(fixture.query('#director_fate_tube').hidden, false);
+    await fixture.close();
+});
+
+test('tube sticks render rarity emblems, disable actions while busy, and show errors in tube status', async t => {
+    let requestShouldFail = true;
+    const fixture = lab(t, {
+        tube: true,
+        tubeActions: {
+            request: async () => { if (requestShouldFail) throw new Error('provider down'); return true; },
+            adopt: async () => { throw new Error('先采用或弃掉手中的牌，再上签。'); },
+            shake: async () => { throw new Error('save failed'); },
+            reject: async () => { throw new Error('save failed'); },
+        },
+    });
+    fixture.setView({ tube: { ...tubeData } });
+    fixture.open({ tab: 'tube' });
+
+    const [kept] = fixture.query('#director_fate_tube_list').children;
+    const dot = kept.querySelector('.director_fate_rarity_dot');
+    assert.equal(dot.dataset.rarity, 'rare');
+    assert.equal(dot.getAttribute('aria-label'), '稀有');
+    assert.equal(dot.querySelector('.director_fate_mark_emblem').dataset.silhouette, 'gem');
+
+    // Busy state disables stick action buttons.
+    fixture.setView({ tube: { ...tubeData, busy: true, canRequest: false, canShake: false } });
+    assert.equal(kept.querySelectorAll('.director_fate_tube_stick_actions button').every(btn => btn.disabled), true);
+    fixture.setView({ tube: { ...tubeData, busy: false } });
+    assert.equal(kept.querySelectorAll('.director_fate_tube_stick_actions button').every(btn => !btn.disabled), true);
+
+    // Request failure shows in #director_fate_tube_status, not hidden #director_fate_status.
+    fixture.query('#director_fate_tube_request').click();
+    await settle();
+    assert.equal(fixture.query('#director_fate_tube_status').textContent, '求签失败，请重试。');
+    assert.equal(fixture.query('#director_fate_status').textContent.includes('求签失败'), false);
+
+    // Adoption with a held card surfaces the actionable reason without playing the seal sound.
+    fixture.setView({ held: entry('held-card'), tube: { ...tubeData } });
+    fixture.sounds.length = 0;
+    kept.querySelector('.director_fate_tube_stick_actions button').click();
+    await settle();
+    assert.equal(fixture.query('#director_fate_tube_status').textContent, '先采用或弃掉手中的牌，再上签。');
+    assert.deepEqual(fixture.sounds, []);
+
+    // Closed tube exposes a clear disabled tooltip on shake.
+    fixture.setView({ held: null, tube: { ...tubeData, closed: true, canShake: false } });
+    assert.equal(fixture.query('#director_fate_tube_shake').getAttribute('title'), '这筒已上签，其余签已作废');
+    assert.equal(fixture.query('#director_fate_tube_list').children[0].querySelectorAll('button').length, 0);
+
+    // Successful request clears the tube error.
+    requestShouldFail = false;
+    fixture.query('#director_fate_tube_request').click();
+    await settle();
+    assert.equal(fixture.query('#director_fate_tube_status').textContent, '');
+    await fixture.close();
+});
+
+test('tube pane honors [hidden], keeps stick rarity dot inline, and honors prefers-reduced-motion', () => {
+    const css = readFileSync(new URL('../public/scripts/extensions/director/style.css', import.meta.url), 'utf8');
+    assert.equal(css.includes('#director_fate_panel #director_fate_tube:not([hidden]) { display: flex;'), true);
+    assert.equal(/#director_fate_panel #director_fate_tube\s*\{/.test(css), false, 'bare tube ID rule must not override [hidden]');
+    assert.equal(/\.director_fate_tube_stick \.director_fate_rarity_dot\s*\{[^}]*position:\s*static/.test(css), true);
+    const media = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'));
+    assert.equal(media.includes('.director_fate_tube_luck_fill { transition: none; }'), true);
+});
