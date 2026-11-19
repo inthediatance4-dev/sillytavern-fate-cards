@@ -217,7 +217,7 @@ def main():
             shoot('05-shaken')
 
             # ── 上签 ──
-            page.locator('.director_fate_tube_stick').first.locator('.director_fate_tube_stick_actions button').first.click()
+            page.locator('.director_fate_tube_stick').first.locator('[data-tube-action="adopt"]').click()
             page.wait_for_timeout(800)
             adopted = page.locator('#director_fate_apply').is_visible() and page.locator('#director_fate_title').inner_text() != ''
             step('adopt', bool(adopted))
@@ -257,7 +257,7 @@ def main():
                 "() => document.querySelectorAll('#director_fate_tube_list .director_fate_tube_stick').length >= 3",
                 timeout=30000)
             rejected_text = page.locator('.director_fate_tube_stick .director_fate_tube_text').first.inner_text()
-            page.locator('.director_fate_tube_stick').first.locator('.director_fate_tube_stick_actions button').nth(1).click()
+            page.locator('.director_fate_tube_stick').first.locator('[data-tube-action="reject"]').click()
             page.wait_for_timeout(800)
             rejected_marked = page.locator('.director_fate_tube_stick.is_rejected').count() >= 1
             page.click('#director_fate_tube_request')

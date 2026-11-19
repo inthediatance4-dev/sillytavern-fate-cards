@@ -1,8 +1,9 @@
 import { messageFingerprint } from './instruct.js';
 import { ALL_TITLES, CATEGORIES, CATEGORY_IDS, RARITIES, findCategoryByTitle, rollOffer } from './fate-decks.js';
-import { TUBE_LUCK_MAX, TUBE_MESSAGE_WINDOW, TUBE_OUTPUT_TOKENS, TUBE_SCHEMA,
-    adoptTubeStick, collectRejectedTexts, createTubeState, excerptMessage, parseTubeResponse,
-    readTube, rejectTubeStick, shakeTube as shakeTubeState, tubeRequestPrompt } from './fate-tube.js';
+import { TUBE_EXPAND_OUTPUT_TOKENS, TUBE_EXPAND_SCHEMA, TUBE_LUCK_MAX, TUBE_MESSAGE_WINDOW, TUBE_OUTPUT_TOKENS,
+    TUBE_SCHEMA, adoptTubeStick, collectRejectedTexts, createTubeState, excerptMessage, parseTubeExpandResponse,
+    parseTubeResponse, readTube, rejectTubeStick, shakeTube as shakeTubeState, tubeExpandPrompt,
+    tubeRequestPrompt } from './fate-tube.js';
 
 /** Legacy shared key is only cleaned up; new Fate prompts are request-local. */
 export const FATE_PROMPT_KEY = 'director_fate';
@@ -451,8 +452,18 @@ export function createFateController(getContext, options = {}) {
     }
 
     // ── 签筒（明签模式）───────────────────────────────────────────────
-    // Local tube actions commit small state changes; the tube request is the
-    // only model call and owns an abort controller, like every card operation.
+    // Local tube actions commit small state changes; requesting a tube and
+    // expanding a stick are the only model calls and share one abortable slot.
+    function recentTubeMessages(chat) {
+        return (Array.isArray(chat) ? chat : []).slice(-TUBE_MESSAGE_WINDOW)
+            .filter(message => message && (message.is_user === true || (message.is_user === false && !message.is_system))
+                && typeof message.mes === 'string' && message.mes.trim())
+            .map(message => ({
+                name: typeof message.name === 'string' && message.name ? message.name : message.is_user ? '玩家' : '角色',
+                text: excerptMessage(message.mes),
+            }));
+    }
+
     function tubeView() {
         if (!tubeEnabled()) return null;
         const context = getContext();
@@ -463,7 +474,7 @@ export function createFateController(getContext, options = {}) {
         const chatOpen = Boolean(context.chatMetadata) && Array.isArray(context.chat)
             && (isGroup(context) || context.characterId !== undefined);
         const generating = isGenerating();
-        return {
+        const result = {
             luck: tube.luck, total: tube.pool.length, unseen, closed: tube.adoptedId !== null,
             busy: requestBusy, canRequest: chatOpen && !requestBusy && !cardBusy && !generating,
             canShake: chatOpen && tube.luck > 0 && unseen > 0 && tube.adoptedId === null && !requestBusy && !cardBusy && !generating,
@@ -472,6 +483,8 @@ export function createFateController(getContext, options = {}) {
                 rejected: stick.rejected === true, adopted: tube.adoptedId === stick.id,
             })),
         };
+        if (requestBusy && tubeBusy.action === 'expand') result.expandingId = tubeBusy.stickId;
+        return result;
     }
 
     function requireTube() {
@@ -526,18 +539,57 @@ export function createFateController(getContext, options = {}) {
         return card;
     }
 
+    async function expandStick(id, strength = 'medium') {
+        requireTube();
+        if (!Object.hasOwn(STRENGTHS, strength)) throw new Error('请选择轻微波澜、明显转折或重大变故。');
+        const context = getContext();
+        const value = state(context.chatMetadata);
+        if (!adoptTubeStick(value.tube, id)) throw new Error('这支签不能采用。');
+        if (value.held) throw new Error('先采用或弃掉手中的牌，再上签。');
+        const stick = value.tube.pool.find(item => item.id === id);
+        const recent = recentTubeMessages(context.chat);
+        nonce++;
+        const snapshot = capture(context);
+        const operation = tubeBusy = { snapshot, controller: new AbortController(), cancelled: false, action: 'expand', stickId: id };
+        notify();
+        try {
+            const raw = await snapshot.context.generateQuietPrompt({
+                isolated: true, jsonSchema: TUBE_EXPAND_SCHEMA, maxOutputTokens: TUBE_EXPAND_OUTPUT_TOKENS,
+                signal: operation.controller.signal,
+                quietPrompt: tubeExpandPrompt({ stick, strength, messages: recent }),
+            });
+            if (!current(snapshot) || operation.cancelled || !tubeEnabled()) return false;
+            const event = parseTubeExpandResponse(raw);
+            // Re-read state so luck accrued while expanding is preserved.
+            const latest = state(snapshot.metadata);
+            const tube = adoptTubeStick(latest.tube, id);
+            if (!tube) throw new Error('这支签不能采用。');
+            if (latest.held) throw new Error('先采用或弃掉手中的牌，再上签。');
+            const latestStick = tube.pool.find(item => item.id === id);
+            const card = {
+                id: uuid(), title: categoryById.get(latestStick.category).titles[0], strength,
+                event, category: latestStick.category, rarity: latestStick.rarity,
+            };
+            const saved = await commit(snapshot, { ...latest, held: card, tube });
+            return saved ? card : false;
+        } catch (error) {
+            if (!current(snapshot) || operation.cancelled) return false;
+            if (error?.name === 'AbortError') throw new Error('展开被取消。');
+            if (['命运牌保存失败，请重试。', '先采用或弃掉手中的牌，再上签。', '这支签不能采用。'].includes(error?.message)) throw error;
+            throw new Error('签文展开失败，请稍后再试。');
+        } finally {
+            if (tubeBusy === operation) { tubeBusy = null; if (current(snapshot)) notify(); }
+        }
+    }
+
     async function requestTube() {
         requireTube();
         const context = getContext();
         const rejected = collectRejectedTexts(state(context.chatMetadata).tube);
-        const recent = (Array.isArray(context.chat) ? context.chat : []).slice(-TUBE_MESSAGE_WINDOW)
-            .filter(message => message && (message.is_user === true || (message.is_user === false && !message.is_system))
-                && typeof message.mes === 'string' && message.mes.trim())
-            .map(message => ({ name: typeof message.name === 'string' && message.name ? message.name : message.is_user ? '玩家' : '角色',
-                text: excerptMessage(message.mes) }));
+        const recent = recentTubeMessages(context.chat);
         nonce++;
         const snapshot = capture(context);
-        const operation = tubeBusy = { snapshot, controller: new AbortController(), cancelled: false };
+        const operation = tubeBusy = { snapshot, controller: new AbortController(), cancelled: false, action: 'request', stickId: null };
         notify();
         try {
             const raw = await snapshot.context.generateQuietPrompt({
@@ -896,5 +948,5 @@ export function createFateController(getContext, options = {}) {
         clearPrompt();
     });
     return { view, log, recoverLog, clearLog, draw, deal, pick, discard, apply, prepare,
-        shake, rejectStick, adoptStick, requestTube, onChapterMarked };
+        shake, rejectStick, adoptStick, expandStick, requestTube, onChapterMarked };
 }

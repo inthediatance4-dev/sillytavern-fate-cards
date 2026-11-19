@@ -291,6 +291,9 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
         '先采用或弃掉手中的牌，再上签。',
         '这支签不能采用。',
         '正在生成，请稍后重试。',
+        '展开被取消。',
+        '命运牌保存失败，请重试。',
+        '请选择轻微波澜、明显转折或重大变故。',
     ]);
 
     function syncTube(tube, view) {
@@ -319,6 +322,7 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
         const luckNow = panel.querySelector('#director_fate_tube_luck_now');
         if (luckNow) luckNow.textContent = String(luck);
 
+        const expanding = Boolean(tube.expandingId);
         const shake = panel.querySelector('#director_fate_tube_shake');
         shake.disabled = !tube.canShake;
         if (tube.closed) shake.setAttribute('title', '这筒已上签，其余签已作废');
@@ -327,9 +331,10 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
         else shake.removeAttribute('title');
         const request = panel.querySelector('#director_fate_tube_request');
         request.disabled = !tube.canRequest;
-        request.textContent = tube.busy ? '求签中…' : tube.total ? '再求一筒' : '求一筒';
+        request.textContent = tube.busy && !expanding ? '求签中…' : tube.total ? '再求一筒' : '求一筒';
         const list = panel.querySelector('#director_fate_tube_list');
-        const seenKeys = `${tube.closed ? 'c' : 'o'}|${tube.seen.map(stick => `${stick.id}:${stick.rejected ? 'r' : ''}:${stick.adopted ? 'a' : ''}`).join('|')}`;
+        const canExpand = typeof controller.expandStick === 'function';
+        const seenKeys = `${tube.closed ? 'c' : 'o'}${canExpand ? 'e' : ''}|${tube.seen.map(stick => `${stick.id}:${stick.rejected ? 'r' : ''}:${stick.adopted ? 'a' : ''}`).join('|')}`;
         if (list.dataset.keys !== seenKeys) {
             list.dataset.keys = seenKeys;
             list.replaceChildren();
@@ -361,22 +366,48 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
                             resolveError: reason => TUBE_ADOPT_ERRORS.has(reason?.message) ? reason.message : '',
                         });
                     });
+                    adopt.dataset.tubeAction = 'adopt';
                     const reject = button('', '不要', () => action(() => controller.rejectStick(stick.id), '未能拒签，请重试。', { tube: true }));
-                    stickActions.append(adopt, reject);
+                    reject.dataset.tubeAction = 'reject';
+                    if (canExpand) {
+                        const expand = button('', '展开', () => {
+                            const strength = panel.querySelector('#director_fate_strength')?.value || 'medium';
+                            action(async () => {
+                                if (await controller.expandStick(stick.id, strength)) {
+                                    sound.play('seal');
+                                    error = '';
+                                    selectTab('current');
+                                }
+                            }, '签文展开失败，请重试。', {
+                                tube: true,
+                                resolveError: reason => TUBE_ADOPT_ERRORS.has(reason?.message) ? reason.message : '',
+                            });
+                        });
+                        expand.dataset.tubeAction = 'expand';
+                        expand.setAttribute('title', '以这支签为种子，调用一次当前连接扩写成完整事件后上牌');
+                        stickActions.append(adopt, expand, reject);
+                    } else {
+                        stickActions.append(adopt, reject);
+                    }
                 }
                 item.append(dot, text, stickActions);
                 list.append(item);
             }
         }
         const stickBusy = Boolean(view?.busy || tube.busy);
-        for (const control of list.querySelectorAll('.director_fate_tube_stick_actions button')) {
-            control.disabled = stickBusy;
+        for (const item of list.querySelectorAll('.director_fate_tube_stick')) {
+            const expandBtn = item.querySelector('[data-tube-action="expand"]');
+            if (expandBtn) expandBtn.textContent = tube.expandingId === item.dataset.stickId ? '展开中…' : '展开';
+            for (const control of item.querySelectorAll('.director_fate_tube_stick_actions button')) {
+                control.disabled = stickBusy;
+            }
         }
         panel.querySelector('#director_fate_tube_hint').textContent = tube.total === 0
             ? '还没有签。点「求一筒」，用当前的模型连接求 12 支明签。'
             : tube.closed ? '这筒已上了一支签；其余的签随它作废，求新筒另起一筒。'
                 : `筒中还有 ${tube.unseen} 支没摇出。`;
-        panel.querySelector('#director_fate_tube_status').textContent = tubeError || (tube.busy ? '正在为这段剧情求签…' : '');
+        panel.querySelector('#director_fate_tube_status').textContent = tubeError
+            || (expanding ? '正在展开签文…' : tube.busy ? '正在为这段剧情求签…' : '');
     }
 
     function refresh() {
@@ -653,7 +684,7 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
         tubeStatus.setAttribute('role', 'status');
         tubeStatus.setAttribute('aria-live', 'polite');
         const tubeCost = document.createElement('small');
-        tubeCost.textContent = '求一筒调用一次当前连接，写出一筒 12 支明签；摇签不连模型，每摇一次消耗 1 点运。每条新回复 +1 运，标记新章节时回满。一筒只可上一支签。';
+        tubeCost.textContent = '求一筒调用一次当前连接，写出一筒 12 支明签；摇签不连模型，每摇一次消耗 1 点运。每条新回复 +1 运，标记新章节时回满。「上签」直接采用签文，「展开」再调一次连接扩写成完整事件后上牌；一筒只可上一支签。';
         tubePane.append(tubeLuck, tubeControls, tubeList, tubeHint, tubeStatus, tubeCost);
         const preferences = document.createElement('div');
         preferences.id = 'director_fate_settings';

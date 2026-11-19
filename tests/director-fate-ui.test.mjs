@@ -198,7 +198,7 @@ function lab(t, { entries = [entry('first')], reveal = 'tap', motion = 'system',
         log: () => logs.map(value => ({ ...value })),
         async clearLog() { clears++; logs = []; },
         shake: tubeActions.shake, requestTube: tubeActions.request,
-        adoptStick: tubeActions.adopt, rejectStick: tubeActions.reject,
+        adoptStick: tubeActions.adopt, expandStick: tubeActions.expand, rejectStick: tubeActions.reject,
     };
     const panel = createFatePanel(controller, {
         Popup, POPUP_TYPE: { TEXT: 'text' }, POPUP_RESULT: { AFFIRMATIVE: 1 }, hasDraft: () => false,
@@ -852,6 +852,71 @@ test('tube pane honors [hidden], keeps stick rarity dot inline, and honors prefe
     assert.equal(css.includes('#director_fate_panel #director_fate_tube:not([hidden]) { display: flex;'), true);
     assert.equal(/#director_fate_panel #director_fate_tube\s*\{/.test(css), false, 'bare tube ID rule must not override [hidden]');
     assert.equal(/\.director_fate_tube_stick \.director_fate_rarity_dot\s*\{[^}]*position:\s*static/.test(css), true);
+    assert.equal(/\.director_fate_tube_stick_actions:empty\s*\{\s*display:\s*none;\s*\}/.test(css), true);
     const media = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'));
     assert.equal(media.includes('.director_fate_tube_luck_fill { transition: none; }'), true);
+});
+
+test('tube expand button passes strength, shows expanding state, handles abort/errors, and switches to current on success', async t => {
+    const calls = [];
+    let outcome = 'fail';
+    const fixture = lab(t, {
+        tube: true,
+        tubeActions: {
+            expand: async (id, strength) => {
+                calls.push({ id, strength });
+                if (outcome === 'fail') throw new Error('provider down');
+                if (outcome === 'held') throw new Error('先采用或弃掉手中的牌，再上签。');
+                if (outcome === 'abort') return false;
+                return { id: 'card-expanded', title: '意外的回声', strength, rarity: 'rare' };
+            },
+        },
+    });
+    fixture.setView({ tube: { ...tubeData } });
+    fixture.open({ tab: 'tube' });
+
+    const [kept] = fixture.query('#director_fate_tube_list').children;
+    const actions = kept.querySelectorAll('.director_fate_tube_stick_actions button');
+    assert.deepEqual(actions.map(node => node.dataset.tubeAction), ['adopt', 'expand', 'reject']);
+    assert.deepEqual(actions.map(node => node.textContent), ['上签', '展开', '不要']);
+
+    // Expanding status updates only the targeted expand button without relabeling requestTube.
+    fixture.setView({ tube: { ...tubeData, busy: true, expandingId: 's0', canRequest: false, canShake: false } });
+    assert.equal(actions[1].textContent, '展开中…');
+    assert.equal(actions.every(node => node.disabled), true);
+    assert.equal(fixture.query('#director_fate_tube_request').textContent, '再求一筒');
+    assert.equal(fixture.query('#director_fate_tube_status').textContent, '正在展开签文…');
+    fixture.setView({ tube: { ...tubeData, busy: false } });
+    assert.equal(actions[1].textContent, '展开');
+
+    // Failure surfaces in #director_fate_tube_status and stays on the tube tab.
+    fixture.query('#director_fate_strength').value = 'strong';
+    actions[1].click();
+    await settle();
+    assert.deepEqual(calls, [{ id: 's0', strength: 'strong' }]);
+    assert.equal(fixture.query('#director_fate_tube_status').textContent, '签文展开失败，请重试。');
+    assert.equal(fixture.query('#director_fate_tab_tube').getAttribute('aria-selected'), 'true');
+    assert.deepEqual(fixture.sounds, []);
+
+    // Actionable held-card error surfaces directly.
+    outcome = 'held';
+    actions[1].click();
+    await settle();
+    assert.equal(fixture.query('#director_fate_tube_status').textContent, '先采用或弃掉手中的牌，再上签。');
+
+    // Aborted expand (false) stays on tube tab without playing seal sound or setting an error.
+    outcome = 'abort';
+    actions[1].click();
+    await settle();
+    assert.equal(fixture.query('#director_fate_tube_status').textContent, '');
+    assert.equal(fixture.query('#director_fate_tab_tube').getAttribute('aria-selected'), 'true');
+    assert.deepEqual(fixture.sounds, []);
+
+    // Successful expand plays seal sound and switches to the current card tab.
+    outcome = 'ok';
+    actions[1].click();
+    await settle();
+    assert.deepEqual(fixture.sounds, ['seal']);
+    assert.equal(fixture.query('#director_fate_tab_current').getAttribute('aria-selected'), 'true');
+    await fixture.close();
 });

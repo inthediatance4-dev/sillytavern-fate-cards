@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+    TUBE_EXPAND_MAX_CODEPOINTS, TUBE_EXPAND_OUTPUT_TOKENS, TUBE_EXPAND_SCHEMA,
     TUBE_LUCK_MAX, TUBE_MESSAGE_WINDOW, TUBE_OUTPUT_TOKENS, TUBE_POOL_SIZE, TUBE_REJECTED_LIMIT,
     TUBE_REVEAL_COUNT, TUBE_SCHEMA, TUBE_STICK_MAX_CODEPOINTS,
-    adoptTubeStick, collectRejectedTexts, createTubeState, excerptMessage, parseTubeResponse,
-    readTube, rejectTubeStick, shakeTube, tubeRequestPrompt,
+    adoptTubeStick, collectRejectedTexts, createTubeState, excerptMessage, parseTubeExpandResponse,
+    parseTubeResponse, readTube, rejectTubeStick, shakeTube, tubeExpandPrompt, tubeRequestPrompt,
 } from '../public/scripts/extensions/director/fate-tube.js';
 
 const stick = (index, fields = {}) => ({ id: `s${index}`, category: 'echo', rarity: 'common', text: `走向 ${index}`, ...fields });
@@ -161,4 +162,50 @@ test('the schema pins exactly twelve sticks with the deck categories and raritie
     assert.deepEqual(sticks.items.properties.rarity.enum, ['common', 'rare', 'legendary']);
     assert.equal(sticks.items.properties.text.maxLength, TUBE_STICK_MAX_CODEPOINTS);
     assert.equal(sticks.items.additionalProperties, false);
+});
+
+test('parseTubeExpandResponse accepts exact or fenced {"event"} up to 400 codepoints and rejects invalid payloads', () => {
+    const exact400 = '🧭'.repeat(TUBE_EXPAND_MAX_CODEPOINTS);
+    assert.equal(parseTubeExpandResponse(JSON.stringify({ event: '  一场突如其来的停电困住了所有人。  ' })), '一场突如其来的停电困住了所有人。');
+    assert.equal(parseTubeExpandResponse('```json\n' + JSON.stringify({ event: exact400 }) + '\n```'), exact400);
+    assert.equal(TUBE_EXPAND_MAX_CODEPOINTS, 400);
+    assert.equal(TUBE_EXPAND_OUTPUT_TOKENS, 512);
+    assert.equal(TUBE_EXPAND_SCHEMA.value.additionalProperties, false);
+    assert.equal(TUBE_EXPAND_SCHEMA.value.properties.event.maxLength, TUBE_EXPAND_MAX_CODEPOINTS);
+
+    const bad = [
+        '', 'not json', '```json\n{"event":"ok"}', JSON.stringify({ event: 'ok' }) + ' trailing',
+        JSON.stringify([]), JSON.stringify(null), JSON.stringify({}),
+        JSON.stringify({ event: '' }), JSON.stringify({ event: '   \n\t ' }),
+        JSON.stringify({ event: 'x'.repeat(TUBE_EXPAND_MAX_CODEPOINTS + 1) }),
+        JSON.stringify({ event: '包含控制符\u0007' }),
+        JSON.stringify({ event: 'ok', extra: 1 }),
+        '{"event":"ok","__proto__":{}}',
+        JSON.stringify({ event: 42 }),
+        'x'.repeat(16001),
+    ];
+    for (const candidate of bad) assert.throws(() => parseTubeExpandResponse(candidate), TypeError, candidate.slice(0, 80));
+});
+
+test('tubeExpandPrompt carries seed, category theme, strength, rarity guidance, messages and boundaries', () => {
+    const rareStick = { category: 'secret', rarity: 'rare', text: '抽屉夹层里多出一把陌生钥匙' };
+    const prompt = tubeExpandPrompt({
+        stick: rareStick,
+        strength: 'strong',
+        messages: [{ name: '甲', text: '我们刚刚回到旅店。' }],
+    });
+    assert.ok(prompt.includes(JSON.stringify(rareStick.text)));
+    assert.ok(prompt.includes('a secret or hidden fact beginning to surface'));
+    assert.ok(prompt.includes('a major, consequential upheaval'));
+    assert.ok(prompt.includes('earlier in the story'), 'rare guidance is included');
+    assert.ok(prompt.includes(JSON.stringify([{ name: '甲', text: '我们刚刚回到旅店。' }])));
+    assert.ok(prompt.includes(JSON.stringify(TUBE_EXPAND_SCHEMA.value)));
+    assert.match(prompt, /400 个 Unicode 码点/);
+    assert.match(prompt, /不据此推动恋爱、亲密或服从/);
+
+    const commonPrompt = tubeExpandPrompt({ stick: { category: 'echo', rarity: 'common', text: '远处传来钟声' } });
+    assert.equal(commonPrompt.includes('earlier in the story'), false, 'common stick omits rare guidance');
+
+    assert.throws(() => tubeExpandPrompt({ stick: { category: 'bad', rarity: 'common', text: 'x' } }), TypeError);
+    assert.throws(() => tubeExpandPrompt({ stick: rareStick, strength: 'extreme' }), TypeError);
 });
