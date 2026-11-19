@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from '../public/lib/eventemitter.js';
 import { createFateController } from '../public/scripts/extensions/director/fate.js';
-import { TUBE_OUTPUT_TOKENS, TUBE_POOL_SIZE, TUBE_SCHEMA, parseTubeResponse, tubeRequestPrompt } from '../public/scripts/extensions/director/fate-tube.js';
+import { TUBE_EXPAND_OUTPUT_TOKENS, TUBE_EXPAND_SCHEMA, TUBE_OUTPUT_TOKENS, TUBE_POOL_SIZE, TUBE_SCHEMA,
+    parseTubeResponse, tubeRequestPrompt } from '../public/scripts/extensions/director/fate-tube.js';
+import { createIsolatedGenerator } from '../public/scripts/plugin-runtime/requests.js';
 
 globalThis.localStorage = { getItem: () => null };
 
@@ -308,4 +310,234 @@ test('aborting an in-flight tube request notifies UI, generation gates shaking, 
     const empty = lab();
     empty.context.chatMetadata = null;
     assert.doesNotThrow(() => empty.controller.onChapterMarked());
+});
+
+test('expandStick sends one isolated bounded request, seals the expanded event, closes the tube, and rides apply + swipe', async () => {
+    const expandedEvent = '码头雾气骤起，渡船汽笛在浓雾深处突兀响了一声，随后岸边路灯接连熄灭，只余下铁链撞击石阶的回响。';
+    let mode = 'pool';
+    const fixture = lab({
+        response: () => mode === 'pool' ? rawPool() : JSON.stringify({ event: expandedEvent }),
+    });
+    await fixture.controller.requestTube();
+    await fixture.controller.shake();
+    mode = 'expand';
+    const [first] = fixture.controller.view().tube.seen;
+    const card = await fixture.controller.expandStick(first.id, 'strong');
+
+    assert.equal(fixture.quietCalls.length, 2);
+    const options = fixture.quietCalls[1];
+    assert.equal(options.isolated, true);
+    assert.equal(options.maxOutputTokens, TUBE_EXPAND_OUTPUT_TOKENS);
+    assert.deepEqual(options.jsonSchema, TUBE_EXPAND_SCHEMA);
+    assert.ok(options.signal instanceof AbortSignal);
+    assert.ok(options.quietPrompt.includes(JSON.stringify(first.text)), 'the chosen stick seed rides in the prompt');
+    assert.ok(options.quietPrompt.includes('a major, consequential upheaval'), 'selected strength rides in the prompt');
+    assert.ok(options.quietPrompt.includes('开头一句。'), 'recent chat context rides in the prompt');
+    assert.equal(options.quietPrompt.includes('系统行不进签筒'), false, 'system rows stay excluded');
+
+    assert.equal(card.event, expandedEvent);
+    assert.equal(card.strength, 'strong');
+    assert.equal(card.category, first.category);
+    assert.equal(card.rarity, first.rarity);
+    assert.equal(fixture.tubeState.adoptedId, first.id);
+    assert.equal(fixture.controller.view().tube.closed, true);
+    assert.equal('expandingId' in fixture.controller.view().tube, false, 'idle tube view keeps its exact shape');
+    assert.equal(JSON.stringify(fixture.controller.view()).includes(expandedEvent), false, 'expanded event stays sealed in held card');
+
+    let token;
+    fixture.setGenerator(async () => { token = (await fixture.runGeneration('normal')).token; });
+    assert.equal(await fixture.controller.apply(), true);
+    assert.ok(token.includes(expandedEvent), 'injected frame carries the expanded event');
+    assert.equal(fixture.metadata.director.fate.bound.event, expandedEvent);
+    assert.equal(fixture.controller.view().reveal.event, expandedEvent);
+
+    fixture.setGenerating(true);
+    const swipeChat = fixture.context.chat.map(message => ({ ...message }));
+    assert.equal(fixture.controller.prepare('swipe', swipeChat), true);
+    assert.ok(swipeChat.find(message => message.extra?.directorFatePrompt).mes.includes(expandedEvent));
+});
+
+test('expandStick validates pre-flight without model calls, keeps tube intact on failure, and aborts cleanly', async () => {
+    const disabled = lab({ tube: false });
+    await assert.rejects(disabled.controller.expandStick('s0'), /签筒未启用/);
+    assert.equal(disabled.quietCalls.length, 0);
+
+    let mode = 'pool';
+    const fixture = lab({ response: () => mode === 'pool' ? rawPool() : 'not valid json' });
+    await fixture.controller.requestTube();
+    await fixture.controller.shake();
+    const seen = fixture.controller.view().tube.seen;
+    const unseen = fixture.tubeState.pool.find(stick => !fixture.tubeState.seenIds.includes(stick.id));
+    const beforeCalls = fixture.quietCalls.length;
+
+    await assert.rejects(fixture.controller.expandStick(seen[0].id, 'invalid'), /轻微波澜/);
+    await assert.rejects(fixture.controller.expandStick(unseen.id), /不能采用/);
+    fixture.metadata.director.fate.held = { id: 'held-1', title: '意外的回声', strength: 'medium', event: '旧牌', category: 'echo', rarity: 'common' };
+    await assert.rejects(fixture.controller.expandStick(seen[0].id), /先采用或弃掉手中的牌/);
+    assert.equal(fixture.quietCalls.length, beforeCalls, 'pre-flight rejections make zero model requests');
+
+    // Invalid model output leaves the tube open and usable.
+    fixture.metadata.director.fate.held = null;
+    mode = 'broken';
+    await assert.rejects(fixture.controller.expandStick(seen[0].id), /签文展开失败/);
+    assert.equal(fixture.tubeState.adoptedId, null);
+    assert.equal(fixture.controller.view().tube.closed, false);
+    assert.equal(fixture.controller.view().tube.busy, false);
+
+    // In-flight expand exposes expandingId, blocks concurrent requests, and aborts on generation start/chat switch.
+    const asyncLab = lab({ autoSettle: false, response: () => JSON.stringify({ event: '扩写成功事件。' }) });
+    asyncLab.metadata.director.fate.tube = {
+        version: 1, luck: 5,
+        pool: [{ id: 's0', category: 'echo', rarity: 'rare', text: '雨夜断电' }],
+        seenIds: ['s0'], adoptedId: null,
+    };
+    const pending = asyncLab.controller.expandStick('s0');
+    assert.equal(asyncLab.controller.view().tube.busy, true);
+    assert.equal(asyncLab.controller.view().tube.expandingId, 's0');
+    assert.equal(asyncLab.controller.view().tube.canRequest, false);
+    assert.equal(asyncLab.controller.view().tube.canShake, false);
+    await assert.rejects(asyncLab.controller.requestTube(), /正在生成/);
+    await assert.rejects(asyncLab.controller.expandStick('s0'), /正在生成/);
+    const changesBefore = asyncLab.changes;
+    await asyncLab.emit('GENERATION_STARTED', 'normal', {}, false);
+    assert.ok(asyncLab.changes > changesBefore, 'aborting expand notifies UI');
+    assert.equal(asyncLab.controller.view().tube.busy, false);
+    assert.equal('expandingId' in asyncLab.controller.view().tube, false);
+    asyncLab.failRequest(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+    assert.equal(await pending, false);
+    assert.equal(asyncLab.tubeState.adoptedId, null);
+
+    // Luck accrued while expanding is preserved when the expansion commits.
+    const luckLab = lab({ autoSettle: false, response: () => JSON.stringify({ event: '保留运势回充的完整事件。' }) });
+    luckLab.metadata.director.fate.tube = {
+        version: 1, luck: 4,
+        pool: [{ id: 's0', category: 'echo', rarity: 'common', text: '旧信寄到' }],
+        seenIds: ['s0'], adoptedId: null,
+    };
+    const expanding = luckLab.controller.expandStick('s0');
+    await luckLab.emit('GENERATION_COMPLETED', { data: {}, type: 'normal', chatId: luckLab.context.chatId, chatMetadata: luckLab.context.chatMetadata });
+    assert.equal(luckLab.tubeState.luck, 5);
+    luckLab.settleRequest();
+    const committed = await expanding;
+    assert.equal(committed.event, '保留运势回充的完整事件。');
+    assert.equal(luckLab.tubeState.luck, 5);
+    assert.equal(luckLab.tubeState.adoptedId, 's0');
+});
+
+test('cancelTube aborts active requestTube or expandStick, notifies listeners, and returns false when idle', async () => {
+    const fixture = lab({ autoSettle: false, response: () => JSON.stringify({ event: '不应落盘。' }) });
+    assert.equal(fixture.controller.cancelTube(), false, 'idle cancel is a no-op');
+
+    const req = fixture.controller.requestTube();
+    const beforeReq = fixture.changes;
+    assert.equal(fixture.controller.cancelTube(), true);
+    assert.ok(fixture.changes > beforeReq);
+    assert.equal(fixture.controller.view().tube.busy, false);
+    assert.equal(fixture.aborted.length, 1);
+    fixture.failRequest(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+    assert.equal(await req, false);
+
+    fixture.metadata.director.fate.tube = {
+        version: 1, luck: 6,
+        pool: [{ id: 's0', category: 'secret', rarity: 'legendary', text: '旧怀表里掉出船票' }],
+        seenIds: ['s0'], adoptedId: null,
+    };
+    const exp = fixture.controller.expandStick('s0', 'strong');
+    assert.equal(fixture.controller.view().tube.expandingId, 's0');
+    const beforeExp = fixture.changes;
+    assert.equal(fixture.controller.cancelTube(), true);
+    assert.ok(fixture.changes > beforeExp);
+    assert.equal(fixture.controller.view().tube.busy, false);
+    assert.equal('expandingId' in fixture.controller.view().tube, false);
+    fixture.failRequest(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+    assert.equal(await exp, false);
+    assert.equal(fixture.tubeState.adoptedId, null);
+    assert.equal(fixture.controller.cancelTube(), false);
+});
+
+test('expandStick integrates with real createIsolatedGenerator custom relay transport, schema, abort and error redaction', async () => {
+    const eventSource = new EventEmitter();
+    const sent = [];
+    let behavior = 'ok';
+    let abortableReject;
+    const chatCompletionService = {
+        sendRequest: async (payload, quiet, signal) => {
+            sent.push({ payload, quiet, signal });
+            if (behavior === 'hang') {
+                return new Promise((_resolve, reject) => {
+                    abortableReject = reject;
+                    signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });
+                });
+            }
+            if (behavior === 'leak') throw new Error('Relay 500: sensitive-upstream-body');
+            if (payload.json_schema?.name === 'fate_tube_sticks') return { content: rawPool() };
+            return { content: JSON.stringify({ event: '浓雾之中，渡轮提早拉响了汽笛，岸边栈桥的铁链发出刺耳摩擦声。' }) };
+        },
+    };
+    const metadata = { director: { fate: { version: 1, held: null, bound: null, offer: null, pity: 0, recent: [], log: [], rerolls: 1, tube: freshTube() } } };
+    const context = {
+        eventSource, eventTypes: events, chatId: 'relay-chat', chatMetadata: metadata,
+        groupId: null, characterId: 0,
+        mainApi: 'openai',
+        chatCompletionSettings: {
+            chat_completion_source: 'custom',
+            custom_url: 'https://relay.example.invalid/v1',
+            custom_model: 'flash-lite-test',
+        },
+        chat: [
+            { is_user: true, name: '玩家', mes: '夜风很冷，码头上没有灯。' },
+            { is_user: false, name: '旅伴', mes: '我们得赶在涨潮前上船。', extra: {} },
+        ],
+        extensionPrompts: {},
+        saveMetadata: async () => true,
+        saveMetadataDebounced: () => {},
+    };
+    const isolated = createIsolatedGenerator(() => context, { chatCompletionService });
+    context.generateQuietPrompt = options => isolated(options);
+
+    let serial = 0;
+    const controller = createFateController(() => context, {
+        isGenerating: () => false, uuid: () => `relay-${++serial}`, random: () => 0,
+        save: async (_current, shouldSave) => shouldSave ? shouldSave() : true,
+    });
+
+    await controller.requestTube();
+    await controller.shake();
+    const [stick] = controller.view().tube.seen;
+
+    // Provider error stays static and never leaks upstream response details.
+    behavior = 'leak';
+    await assert.rejects(
+        controller.expandStick(stick.id, 'light'),
+        error => /签文展开失败/.test(error.message) && !error.message.includes('sensitive-upstream-body'),
+    );
+    assert.equal(metadata.director.fate.tube.adoptedId, null);
+
+    // User cancel aborts the real AbortSignal passed to ChatCompletionService.sendRequest.
+    behavior = 'hang';
+    const pending = controller.expandStick(stick.id, 'medium');
+    await Promise.resolve();
+    assert.equal(controller.cancelTube(), true);
+    assert.equal(sent.at(-1).signal.aborted, true);
+    assert.equal(await pending, false);
+    assert.equal(Boolean(abortableReject), true);
+
+    // Happy path sends the exact isolated OpenAI-compatible relay payload and seals the card.
+    behavior = 'ok';
+    const card = await controller.expandStick(stick.id, 'strong');
+    const req = sent.at(-1);
+    assert.equal(req.quiet, true);
+    assert.equal(req.payload.type, 'quiet');
+    assert.equal(req.payload.chat_completion_source, 'custom');
+    assert.equal(req.payload.custom_url, 'https://relay.example.invalid/v1');
+    assert.equal(req.payload.model, 'flash-lite-test');
+    assert.equal(req.payload.max_tokens, TUBE_EXPAND_OUTPUT_TOKENS);
+    assert.equal(req.payload.stream, false);
+    assert.equal(req.payload.include_reasoning, false);
+    assert.equal(req.payload.enable_web_search, false);
+    assert.deepEqual(req.payload.json_schema, TUBE_EXPAND_SCHEMA);
+    assert.equal(req.payload.messages.length, 1);
+    assert.equal(card.strength, 'strong');
+    assert.equal(card.event, '浓雾之中，渡轮提早拉响了汽笛，岸边栈桥的铁链发出刺耳摩擦声。');
+    assert.equal(metadata.director.fate.tube.adoptedId, stick.id);
 });

@@ -11,8 +11,16 @@ export const TUBE_POOL_SIZE = 12;
 export const TUBE_REVEAL_COUNT = 3;
 export const TUBE_REJECTED_LIMIT = 12;
 export const TUBE_STICK_MAX_CODEPOINTS = 60;
+export const TUBE_EXPAND_MAX_CODEPOINTS = 400;
 export const TUBE_MESSAGE_WINDOW = 8;
 export const TUBE_OUTPUT_TOKENS = 768;
+export const TUBE_EXPAND_OUTPUT_TOKENS = 512;
+
+const EXPAND_STRENGTHS = Object.freeze({
+    light: 'a small, plausible ripple',
+    medium: 'a meaningful but manageable turn',
+    strong: 'a major, consequential upheaval',
+});
 
 const forbiddenKeys = new Set(['__proto__', 'prototype', 'constructor']);
 const controlCharacters = /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/u;
@@ -71,8 +79,7 @@ export function readTube(value) {
     return { version: 1, luck, pool, seenIds, adoptedId };
 }
 
-/** Strict tube request: exactly 12 valid, pairwise-distinct sticks or nothing. */
-export function parseTubeResponse(raw) {
+function parseStrictJson(raw) {
     if (typeof raw !== 'string' || raw.length > 16000) throw new TypeError('Invalid tube response');
     let text = raw.trim();
     if (text.startsWith('```')) {
@@ -80,8 +87,12 @@ export function parseTubeResponse(raw) {
         if (!fenced) throw new TypeError('Invalid tube JSON fence');
         text = fenced[1];
     }
-    let value;
-    try { value = JSON.parse(text); } catch { throw new TypeError('Invalid tube JSON'); }
+    try { return JSON.parse(text); } catch { throw new TypeError('Invalid tube JSON'); }
+}
+
+/** Strict tube request: exactly 12 valid, pairwise-distinct sticks or nothing. */
+export function parseTubeResponse(raw) {
+    const value = parseStrictJson(raw);
     if (!plainObject(value) || Object.keys(value).length !== 1 || !Object.hasOwn(value, 'sticks')
         || !Array.isArray(value.sticks) || value.sticks.length !== TUBE_POOL_SIZE) {
         throw new TypeError('Invalid tube response schema');
@@ -97,6 +108,21 @@ export function parseTubeResponse(raw) {
         texts.add(raw.text);
         return { category: raw.category, rarity: raw.rarity, text: raw.text };
     });
+}
+
+/** Strict stick expansion: exactly {"event": "..."} within 400 codepoints and no control chars. */
+export function parseTubeExpandResponse(raw) {
+    const value = parseStrictJson(raw);
+    if (!plainObject(value) || Object.keys(value).some(key => forbiddenKeys.has(key))
+        || Object.keys(value).length !== 1 || !Object.hasOwn(value, 'event')
+        || typeof value.event !== 'string' || controlCharacters.test(value.event)) {
+        throw new TypeError('Invalid tube expand response');
+    }
+    const event = value.event.trim();
+    if (!event.length || Array.from(event).length > TUBE_EXPAND_MAX_CODEPOINTS) {
+        throw new TypeError('Invalid tube expand event');
+    }
+    return event;
 }
 
 /**
@@ -213,5 +239,49 @@ export function tubeRequestPrompt({ messages = [], rejected = [] } = {}) {
     lines.push(`最近剧情（仅供理解语境）：${JSON.stringify(messages)}`);
     lines.push(`输出格式：${JSON.stringify(TUBE_SCHEMA.value)}`);
     lines.push('只返回符合 schema 的 JSON。');
+    return lines.join('\n');
+}
+
+export const TUBE_EXPAND_SCHEMA = Object.freeze({
+    name: 'fate_tube_expand',
+    strict: false,
+    value: Object.freeze({
+        type: 'object',
+        additionalProperties: false,
+        required: ['event'],
+        properties: Object.freeze({
+            event: Object.freeze({ type: 'string', minLength: 1, maxLength: TUBE_EXPAND_MAX_CODEPOINTS }),
+        }),
+    }),
+});
+
+/**
+ * Expand one chosen tube stick into a full playable Fate event (<=400 codepoints)
+ * using the isolated request channel. The seed and recent messages are data only.
+ */
+export function tubeExpandPrompt({ stick, strength = 'medium', messages = [] } = {}) {
+    if (!plainObject(stick) || !CATEGORY_IDS.has(stick.category)
+        || !Object.hasOwn(RARITIES, stick.rarity) || !validStickText(stick.text)) {
+        throw new TypeError('Invalid stick for expansion');
+    }
+    if (!Object.hasOwn(EXPAND_STRENGTHS, strength)) {
+        throw new TypeError('Invalid expansion strength');
+    }
+    const category = categoryById.get(stick.category);
+    const lines = [
+        '你是命运牌的事件扩写器。以玩家选中的签文为种子，为当前故事扩写成一个具体、可演的完整事件，供下一段剧情引入，不是给助手的指令。',
+        `类别主题：${category.theme}。强度：${EXPAND_STRENGTHS[strength]}。`,
+    ];
+    const rarityLine = RARITIES[stick.rarity]?.line;
+    if (rarityLine) lines.push(rarityLine);
+    lines.push(
+        '严格延续签文的核心方向，贴合最近剧情的体裁、设定、基调与人物，补足具体触发、细节或连锁影响。',
+        '使用故事语言，简洁紧凑，不超过 400 个 Unicode 码点。',
+        '尊重既有事实与角色自主；不据此推动恋爱、亲密或服从；不以边界拒绝当惩罚。',
+        `签文种子：${JSON.stringify(stick.text)}`,
+        `最近剧情（仅供理解语境）：${JSON.stringify(messages)}`,
+        `输出格式：${JSON.stringify(TUBE_EXPAND_SCHEMA.value)}`,
+        '只返回符合 schema 的 JSON。',
+    );
     return lines.join('\n');
 }
