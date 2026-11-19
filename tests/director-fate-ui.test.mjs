@@ -199,6 +199,7 @@ function lab(t, { entries = [entry('first')], reveal = 'tap', motion = 'system',
         async clearLog() { clears++; logs = []; },
         shake: tubeActions.shake, requestTube: tubeActions.request,
         adoptStick: tubeActions.adopt, expandStick: tubeActions.expand, rejectStick: tubeActions.reject,
+        cancelTube: tubeActions.cancel,
     };
     const panel = createFatePanel(controller, {
         Popup, POPUP_TYPE: { TEXT: 'text' }, POPUP_RESULT: { AFFIRMATIVE: 1 }, hasDraft: () => false,
@@ -847,14 +848,19 @@ test('tube sticks render rarity emblems, disable actions while busy, and show er
     await fixture.close();
 });
 
-test('tube pane honors [hidden], keeps stick rarity dot inline, and honors prefers-reduced-motion', () => {
+test('tube pane honors [hidden], responsive desktop width, stick rarity/inline dot, and prefers-reduced-motion', () => {
     const css = readFileSync(new URL('../public/scripts/extensions/director/style.css', import.meta.url), 'utf8');
-    assert.equal(css.includes('#director_fate_panel #director_fate_tube:not([hidden]) { display: flex;'), true);
+    assert.equal(/#director_fate_panel #director_fate_tube:not\(\[hidden\]\)\s*\{[^}]*display:\s*flex/.test(css), true);
     assert.equal(/#director_fate_panel #director_fate_tube\s*\{/.test(css), false, 'bare tube ID rule must not override [hidden]');
+    assert.equal(/@media \(min-width: 600px\)\s*\{[^}]*#director_fate_panel\[data-active-tab="tube"\]/.test(css), true);
     assert.equal(/\.director_fate_tube_stick \.director_fate_rarity_dot\s*\{[^}]*position:\s*static/.test(css), true);
     assert.equal(/\.director_fate_tube_stick_actions:empty\s*\{\s*display:\s*none;\s*\}/.test(css), true);
+    assert.equal(/\.director_fate_tube_stick\[data-rarity="legendary"\]/.test(css), true);
     const media = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'));
-    assert.equal(media.includes('.director_fate_tube_luck_fill { transition: none; }'), true);
+    assert.equal(media.includes('.director_fate_tube_luck_fill'), true);
+    assert.equal(media.includes('.director_fate_tube_strength_pill'), true);
+    assert.equal(media.includes('.director_fate_tube_stick'), true);
+    assert.equal(media.includes('.director_fate_tube_banner_dot'), true);
 });
 
 test('tube expand button passes strength, shows expanding state, handles abort/errors, and switches to current on success', async t => {
@@ -918,5 +924,93 @@ test('tube expand button passes strength, shows expanding state, handles abort/e
     await settle();
     assert.deepEqual(fixture.sounds, ['seal']);
     assert.equal(fixture.query('#director_fate_tab_current').getAttribute('aria-selected'), 'true');
+    await fixture.close();
+});
+
+test('tube redesign wires strength radiogroup, stick metadata/badges, loading/error banner and cancel focus restore', async t => {
+    let cancelled = 0;
+    const expanded = [];
+    let currentTube = { ...tubeData };
+    const fixture = lab(t, {
+        tube: true,
+        tubeActions: {
+            expand: async (id, strength) => { expanded.push({ id, strength }); return false; },
+            cancel: () => {
+                cancelled++;
+                currentTube = { ...tubeData, busy: false };
+                fixture.setView({ tube: currentTube });
+                return true;
+            },
+        },
+    });
+    fixture.setView({ tube: currentTube });
+    fixture.open({ tab: 'tube' });
+
+    const panel = fixture.query('#director_fate_panel');
+    assert.equal(panel.dataset.activeTab, 'tube');
+    fixture.query('#director_fate_tab_current').click();
+    assert.equal(panel.dataset.activeTab, 'current');
+    fixture.query('#director_fate_tab_tube').click();
+    assert.equal(panel.dataset.activeTab, 'tube');
+
+    // Strength radiogroup keyboard navigation and two-way sync with #director_fate_strength.
+    const bar = fixture.query('.director_fate_tube_strength_bar');
+    assert.equal(bar.hidden, false);
+    const pills = fixture.query('#director_fate_tube_strength').querySelectorAll('.director_fate_tube_strength_pill');
+    assert.deepEqual(pills.map(node => node.dataset.strength), ['light', 'medium', 'strong']);
+    assert.equal(pills[1].getAttribute('aria-checked'), 'true');
+    assert.equal(pills[1].tabIndex, 0);
+    assert.equal(pills[0].tabIndex, -1);
+
+    pills[1].fire('keydown', { key: 'ArrowRight' });
+    assert.equal(pills[2].getAttribute('aria-checked'), 'true');
+    assert.equal(fixture.document.activeElement, pills[2]);
+    assert.equal(fixture.query('#director_fate_strength').value, 'strong');
+
+    pills[2].fire('keydown', { key: 'Home' });
+    assert.equal(pills[0].getAttribute('aria-checked'), 'true');
+    assert.equal(fixture.query('#director_fate_strength').value, 'light');
+
+    fixture.query('#director_fate_strength').value = 'strong';
+    fixture.query('#director_fate_strength').fire('change');
+    assert.equal(pills[2].getAttribute('aria-checked'), 'true');
+
+    // Stick cards expose rarity, category title, rarity label, and rejected/adopted badges.
+    const [kept, rejected] = fixture.query('#director_fate_tube_list').children;
+    assert.equal(kept.dataset.rarity, 'rare');
+    assert.equal(kept.querySelector('.director_fate_tube_category').textContent, '意外的回声');
+    assert.equal(kept.querySelector('.director_fate_tube_rarity').textContent, '稀有');
+    assert.equal(kept.querySelector('.director_fate_tube_badge').hidden, true);
+    assert.equal(rejected.querySelector('.director_fate_tube_badge').textContent, '已拒签');
+    assert.equal(rejected.querySelector('.director_fate_tube_badge').hidden, false);
+
+    // Banner is hidden when idle; loading tone shows cancel button and expanding card highlight.
+    const banner = fixture.query('.director_fate_tube_banner');
+    const cancelBtn = fixture.query('#director_fate_tube_cancel');
+    assert.equal(banner.hidden, true);
+    assert.equal(cancelBtn.hidden, true);
+
+    currentTube = { ...tubeData, busy: true, expandingId: 's0', canRequest: false, canShake: false };
+    fixture.setView({ tube: currentTube });
+    assert.equal(banner.hidden, false);
+    assert.equal(banner.dataset.tone, 'loading');
+    assert.equal(cancelBtn.hidden, false);
+    assert.equal(cancelBtn.disabled, false);
+    assert.equal(kept.classList.contains('is_expanding'), true);
+    assert.equal(kept.getAttribute('aria-busy'), 'true');
+    assert.equal(kept.querySelector('.director_fate_tube_badge').textContent, '扩写中');
+    assert.equal(pills.every(node => node.disabled), true);
+
+    // Clicking Cancel aborts the active operation and restores focus to the stick's expand button.
+    cancelBtn.click();
+    assert.equal(cancelled, 1);
+    assert.equal(banner.hidden, true);
+    assert.equal(cancelBtn.hidden, true);
+    assert.equal(kept.classList.contains('is_expanding'), false);
+    assert.equal(fixture.document.activeElement, kept.querySelector('[data-tube-action="expand"]'));
+
+    // Adopted stick renders the 已上签 badge cleanly.
+    fixture.setView({ tube: { ...tubeData, closed: true, canShake: false, seen: tubeData.seen.map(stick => ({ ...stick, adopted: stick.id === 's0' })) } });
+    assert.equal(fixture.query('#director_fate_tube_list').children[0].querySelector('.director_fate_tube_badge').textContent, '已上签');
     await fixture.close();
 });

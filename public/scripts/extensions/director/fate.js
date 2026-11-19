@@ -501,6 +501,12 @@ export function createFateController(getContext, options = {}) {
         if (current(operation.snapshot)) notify();
     }
 
+    function cancelTube() {
+        if (!tubeBusy || !current(tubeBusy.snapshot)) return false;
+        abortTubeRequest();
+        return true;
+    }
+
     async function shake() {
         requireTube();
         const context = getContext();
@@ -948,5 +954,5 @@ export function createFateController(getContext, options = {}) {
         clearPrompt();
     });
     return { view, log, recoverLog, clearLog, draw, deal, pick, discard, apply, prepare,
-        shake, rejectStick, adoptStick, expandStick, requestTube, onChapterMarked };
+        shake, rejectStick, adoptStick, expandStick, requestTube, cancelTube, onChapterMarked };
 }

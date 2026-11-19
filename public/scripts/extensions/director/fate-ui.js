@@ -1,4 +1,8 @@
+import { CATEGORIES } from './fate-decks.js';
 import { createFateEmblem } from './fate-marks.js';
+
+const CATEGORY_TITLES = new Map(CATEGORIES.map(category => [category.id, category.titles[0]]));
+const STRENGTH_ORDER = ['light', 'medium', 'strong'];
 
 // A view that predates the allowance, or a mock that omits it, still has the one free swap.
 function rerollsLeft(view) {
@@ -47,6 +51,7 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
         const next = order.includes(tab) ? tab : 'current';
         const changed = next !== activeTab;
         activeTab = next;
+        panel.dataset.activeTab = activeTab;
         for (const name of ['current', 'tube', 'log']) {
             const control = panel.querySelector(`#director_fate_tab_${name}`);
             const pane = panel.querySelector(`#director_fate_${name}`);
@@ -296,6 +301,36 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
         '请选择轻微波澜、明显转折或重大变故。',
     ]);
 
+    function syncTubeStrength(disabled = false) {
+        if (!panel) return;
+        const bar = panel.querySelector('.director_fate_tube_strength_bar');
+        const group = panel.querySelector('#director_fate_tube_strength');
+        if (!bar || !group) return;
+        const canExpand = typeof controller.expandStick === 'function';
+        bar.hidden = !canExpand;
+        if (!canExpand) return;
+        const selected = panel.querySelector('#director_fate_strength')?.value || 'medium';
+        for (const pill of group.querySelectorAll('.director_fate_tube_strength_pill')) {
+            const active = pill.dataset.strength === selected;
+            pill.setAttribute('aria-checked', String(active));
+            pill.tabIndex = active ? 0 : -1;
+            pill.disabled = disabled;
+        }
+    }
+
+    function selectTubeStrength(value, focus = false) {
+        if (!STRENGTH_ORDER.includes(value) || !panel) return;
+        const selectControl = panel.querySelector('#director_fate_strength');
+        if (selectControl) selectControl.value = value;
+        const view = controller.view();
+        syncTubeStrength(Boolean(view?.busy || view?.tube?.busy));
+        if (focus) {
+            const pill = [...panel.querySelectorAll('.director_fate_tube_strength_pill')]
+                .find(node => node.dataset.strength === value);
+            pill?.focus();
+        }
+    }
+
     function syncTube(tube, view) {
         const tab = panel.querySelector('#director_fate_tab_tube');
         const pane = panel.querySelector('#director_fate_tube');
@@ -323,6 +358,9 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
         if (luckNow) luckNow.textContent = String(luck);
 
         const expanding = Boolean(tube.expandingId);
+        const stickBusy = Boolean(view?.busy || tube.busy);
+        pane.setAttribute('aria-busy', String(Boolean(tube.busy)));
+        syncTubeStrength(stickBusy);
         const shake = panel.querySelector('#director_fate_tube_shake');
         shake.disabled = !tube.canShake;
         if (tube.closed) shake.setAttribute('title', '这筒已上签，其余签已作废');
@@ -342,13 +380,27 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
                 const item = document.createElement('li');
                 item.className = 'director_fate_tube_stick';
                 item.dataset.stickId = stick.id;
+                item.dataset.rarity = stick.rarity;
                 if (stick.rejected) item.classList.add('is_rejected');
                 if (stick.adopted) item.classList.add('is_adopted');
+                const meta = document.createElement('div');
+                meta.className = 'director_fate_tube_stick_meta';
                 const dot = document.createElement('span');
                 dot.className = 'director_fate_rarity_dot';
                 dot.dataset.rarity = stick.rarity;
                 dot.setAttribute('aria-label', rarityLabel(stick.rarity));
                 dot.append(createFateEmblem(stick.rarity));
+                const category = document.createElement('span');
+                category.className = 'director_fate_tube_category';
+                category.textContent = CATEGORY_TITLES.get(stick.category) ?? '';
+                const rarity = document.createElement('span');
+                rarity.className = 'director_fate_tube_rarity';
+                rarity.textContent = rarityLabel(stick.rarity);
+                const badge = document.createElement('span');
+                badge.className = 'director_fate_tube_badge';
+                badge.textContent = stick.adopted ? '已上签' : stick.rejected ? '已拒签' : '';
+                badge.hidden = !badge.textContent;
+                meta.append(dot, category, rarity, badge);
                 const text = document.createElement('p');
                 text.className = 'director_fate_tube_text';
                 text.textContent = stick.text;
@@ -366,9 +418,13 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
                             resolveError: reason => TUBE_ADOPT_ERRORS.has(reason?.message) ? reason.message : '',
                         });
                     });
+                    adopt.classList.add('director_fate_btn_adopt');
                     adopt.dataset.tubeAction = 'adopt';
+                    adopt.setAttribute('title', '直接以这句签文上牌（不连模型）');
                     const reject = button('', '不要', () => action(() => controller.rejectStick(stick.id), '未能拒签，请重试。', { tube: true }));
+                    reject.classList.add('director_fate_btn_reject');
                     reject.dataset.tubeAction = 'reject';
+                    reject.setAttribute('title', '拒签，并在下次求筒时避开类似走向');
                     if (canExpand) {
                         const expand = button('', '展开', () => {
                             const strength = panel.querySelector('#director_fate_strength')?.value || 'medium';
@@ -383,21 +439,29 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
                                 resolveError: reason => TUBE_ADOPT_ERRORS.has(reason?.message) ? reason.message : '',
                             });
                         });
+                        expand.classList.add('director_fate_btn_expand');
                         expand.dataset.tubeAction = 'expand';
-                        expand.setAttribute('title', '以这支签为种子，调用一次当前连接扩写成完整事件后上牌');
+                        expand.setAttribute('title', '以这支签为种子，按所选强度调用一次当前连接扩写成完整事件后上牌');
                         stickActions.append(adopt, expand, reject);
                     } else {
                         stickActions.append(adopt, reject);
                     }
                 }
-                item.append(dot, text, stickActions);
+                item.append(meta, text, stickActions);
                 list.append(item);
             }
         }
-        const stickBusy = Boolean(view?.busy || tube.busy);
         for (const item of list.querySelectorAll('.director_fate_tube_stick')) {
+            const isExpanding = Boolean(tube.expandingId) && tube.expandingId === item.dataset.stickId;
+            item.classList.toggle('is_expanding', isExpanding);
+            item.setAttribute('aria-busy', String(isExpanding));
+            const badge = item.querySelector('.director_fate_tube_badge');
+            if (badge && !item.classList.contains('is_adopted') && !item.classList.contains('is_rejected')) {
+                badge.textContent = isExpanding ? '扩写中' : '';
+                badge.hidden = !isExpanding;
+            }
             const expandBtn = item.querySelector('[data-tube-action="expand"]');
-            if (expandBtn) expandBtn.textContent = tube.expandingId === item.dataset.stickId ? '展开中…' : '展开';
+            if (expandBtn) expandBtn.textContent = isExpanding ? '展开中…' : '展开';
             for (const control of item.querySelectorAll('.director_fate_tube_stick_actions button')) {
                 control.disabled = stickBusy;
             }
@@ -406,8 +470,20 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
             ? '还没有签。点「求一筒」，用当前的模型连接求 12 支明签。'
             : tube.closed ? '这筒已上了一支签；其余的签随它作废，求新筒另起一筒。'
                 : `筒中还有 ${tube.unseen} 支没摇出。`;
-        panel.querySelector('#director_fate_tube_status').textContent = tubeError
-            || (expanding ? '正在展开签文…' : tube.busy ? '正在为这段剧情求签…' : '');
+        const statusText = tubeError || (expanding ? '正在展开签文…' : tube.busy ? '正在为这段剧情求签…' : '');
+        const statusNode = panel.querySelector('#director_fate_tube_status');
+        statusNode.textContent = statusText;
+        const banner = panel.querySelector('.director_fate_tube_banner');
+        const cancelBtn = panel.querySelector('#director_fate_tube_cancel');
+        if (banner) {
+            banner.hidden = !statusText && !tube.busy;
+            banner.dataset.tone = tubeError ? 'error' : tube.busy ? 'loading' : '';
+        }
+        if (cancelBtn) {
+            const canCancel = Boolean(tube.busy && typeof controller.cancelTube === 'function');
+            cancelBtn.hidden = !canCancel;
+            cancelBtn.disabled = !canCancel;
+        }
     }
 
     function refresh() {
@@ -562,6 +638,10 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
         offer.setAttribute('role', 'group');
         offer.setAttribute('aria-label', '三张命运牌');
         const strength = select('director_fate_strength', labels, 'medium');
+        strength.addEventListener('change', () => {
+            const view = controller.view();
+            syncTubeStrength(Boolean(view?.busy || view?.tube?.busy));
+        });
         const status = document.createElement('p');
         status.id = 'director_fate_status';
         status.setAttribute('role', 'status');
@@ -635,6 +715,8 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
         tubePane.id = 'director_fate_tube';
         tubePane.setAttribute('role', 'tabpanel');
         tubePane.setAttribute('aria-labelledby', 'director_fate_tab_tube');
+        const tubeHeader = document.createElement('div');
+        tubeHeader.className = 'director_fate_tube_header';
         const tubeLuck = document.createElement('div');
         tubeLuck.className = 'director_fate_tube_luck_row';
         tubeLuck.id = 'director_fate_tube_luck';
@@ -663,29 +745,92 @@ export function createFatePanel(controller, { Popup, POPUP_TYPE, POPUP_RESULT, h
         tubeLuckMax.textContent = '/10';
         tubeLuckValue.append(tubeLuckNow, tubeLuckMax);
         tubeLuck.append(tubeLuckLabel, tubeLuckMeter, tubeLuckValue);
+        const tubeHint = document.createElement('p');
+        tubeHint.id = 'director_fate_tube_hint';
         const tubeControls = document.createElement('div');
         tubeControls.className = 'director_fate_tube_actions';
         const tubeShake = button('director_fate_tube_shake', '摇一摇', () => {
             sound.play('draw');
             action(() => controller.shake(), '未能摇签，请重试。', { tube: true });
         });
+        tubeShake.classList.add('director_fate_btn_primary');
         const tubeRequest = button('director_fate_tube_request', '求一筒', () => action(
             () => controller.requestTube(),
             '求签失败，请重试。',
             { tube: true, resolveError: reason => reason?.message === '求签被取消。' ? reason.message : '' },
         ));
+        tubeRequest.classList.add('director_fate_btn_secondary');
         tubeControls.append(tubeShake, tubeRequest);
-        const tubeList = document.createElement('ol');
-        tubeList.id = 'director_fate_tube_list';
-        const tubeHint = document.createElement('p');
-        tubeHint.id = 'director_fate_tube_hint';
+        tubeHeader.append(tubeLuck, tubeHint, tubeControls);
+
+        const tubeStrengthBar = document.createElement('div');
+        tubeStrengthBar.className = 'director_fate_tube_strength_bar';
+        const tubeStrengthLabel = document.createElement('span');
+        tubeStrengthLabel.className = 'director_fate_tube_strength_label';
+        tubeStrengthLabel.id = 'director_fate_tube_strength_label';
+        tubeStrengthLabel.textContent = '展开强度';
+        const tubeStrengthGroup = document.createElement('div');
+        tubeStrengthGroup.id = 'director_fate_tube_strength';
+        tubeStrengthGroup.className = 'director_fate_tube_strength_group';
+        tubeStrengthGroup.setAttribute('role', 'radiogroup');
+        tubeStrengthGroup.setAttribute('aria-labelledby', 'director_fate_tube_strength_label');
+        for (const value of STRENGTH_ORDER) {
+            const pill = document.createElement('button');
+            pill.type = 'button';
+            pill.className = 'director_fate_tube_strength_pill';
+            pill.dataset.strength = value;
+            pill.setAttribute('role', 'radio');
+            pill.setAttribute('aria-checked', String(value === 'medium'));
+            pill.tabIndex = value === 'medium' ? 0 : -1;
+            pill.textContent = labels[value];
+            pill.addEventListener('click', () => selectTubeStrength(value));
+            pill.addEventListener('keydown', event => {
+                if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+                event.preventDefault();
+                const at = STRENGTH_ORDER.indexOf(value);
+                const next = event.key === 'Home' ? STRENGTH_ORDER[0]
+                    : event.key === 'End' ? STRENGTH_ORDER.at(-1)
+                        : event.key === 'ArrowRight' ? STRENGTH_ORDER[(at + 1) % STRENGTH_ORDER.length]
+                            : STRENGTH_ORDER[(at - 1 + STRENGTH_ORDER.length) % STRENGTH_ORDER.length];
+                selectTubeStrength(next, true);
+            });
+            tubeStrengthGroup.append(pill);
+        }
+        tubeStrengthBar.append(tubeStrengthLabel, tubeStrengthGroup);
+
+        const tubeBanner = document.createElement('div');
+        tubeBanner.className = 'director_fate_tube_banner';
+        tubeBanner.hidden = true;
+        const tubeBannerDot = document.createElement('span');
+        tubeBannerDot.className = 'director_fate_tube_banner_dot';
+        tubeBannerDot.setAttribute('aria-hidden', 'true');
         const tubeStatus = document.createElement('p');
         tubeStatus.id = 'director_fate_tube_status';
         tubeStatus.setAttribute('role', 'status');
         tubeStatus.setAttribute('aria-live', 'polite');
+        const tubeCancel = button('director_fate_tube_cancel', '取消', () => {
+            const expandingId = controller.view().tube?.expandingId;
+            if (!controller.cancelTube?.()) return;
+            tubeError = '';
+            refresh();
+            const stickItem = expandingId
+                ? [...panel.querySelectorAll('.director_fate_tube_stick')].find(node => node.dataset.stickId === expandingId)
+                : null;
+            const target = stickItem?.querySelector('[data-tube-action="expand"]')
+                ?? panel.querySelector('#director_fate_tube_request')
+                ?? panel.querySelector('#director_fate_tab_tube');
+            target?.focus();
+        });
+        tubeCancel.classList.add('director_fate_btn_cancel');
+        tubeCancel.hidden = true;
+        tubeBanner.append(tubeBannerDot, tubeStatus, tubeCancel);
+
+        const tubeList = document.createElement('ol');
+        tubeList.id = 'director_fate_tube_list';
         const tubeCost = document.createElement('small');
-        tubeCost.textContent = '求一筒调用一次当前连接，写出一筒 12 支明签；摇签不连模型，每摇一次消耗 1 点运。每条新回复 +1 运，标记新章节时回满。「上签」直接采用签文，「展开」再调一次连接扩写成完整事件后上牌；一筒只可上一支签。';
-        tubePane.append(tubeLuck, tubeControls, tubeList, tubeHint, tubeStatus, tubeCost);
+        tubeCost.className = 'director_fate_tube_cost';
+        tubeCost.textContent = '求一筒调用一次当前连接，写出一筒 12 支明签；摇签不连模型，每摇一次消耗 1 点运。每条新回复 +1 运，标记新章节时回满。「上签」直接采用签文，「展开」按所选强度再调一次连接扩写成完整事件后上牌；一筒只可上一支签。';
+        tubePane.append(tubeHeader, tubeStrengthBar, tubeBanner, tubeList, tubeCost);
         const preferences = document.createElement('div');
         preferences.id = 'director_fate_settings';
         preferences.hidden = true;
