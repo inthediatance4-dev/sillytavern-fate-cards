@@ -55,18 +55,21 @@ function lab({ tube = true, response = rawPool(), autoSettle = true } = {}) {
         saveMetadataDebounced: () => { saves++; },
     };
     let generator = async () => {};
+    let changes = 0;
+    let enabled = tube;
     const controller = createFateController(() => context, {
         isGenerating: () => generating, uuid: () => `host-${++serial}`, random: () => 0,
         save: async (_current, shouldSave) => shouldSave ? shouldSave() : true,
-        tubeEnabled: () => tube,
+        tubeEnabled: () => enabled,
         generate: async current => generator(current),
-        onChange: () => {},
+        onChange: () => { changes++; },
     });
     const emit = (name, ...args) => eventSource.emit(events[name], ...args);
     return {
         controller, metadata, quietCalls, aborted, emit,
-        get context() { return context; }, get saves() { return saves; },
+        get context() { return context; }, get saves() { return saves; }, get changes() { return changes; },
         setGenerating(value) { generating = value; },
+        setTubeEnabled(value) { enabled = value; },
         switchChat() { context = { ...context, chatId: 'chat-two', chatMetadata: { director: {} } }; },
         settleRequest() { resolveRequest(); },
         failRequest(reason = new Error('provider down')) { rejectRequest(reason); },
@@ -271,4 +274,38 @@ test('rejected sticks ride the next request and the held card blocks adoption', 
     await fixture.controller.shake();
     const [stick] = fixture.controller.view().tube.seen;
     await assert.rejects(fixture.controller.adoptStick(stick.id), /先采用或弃掉手中的牌/);
+});
+
+test('aborting an in-flight tube request notifies UI, generation gates shaking, and disabling mid-flight skips commit', async () => {
+    for (const event of ['GENERATION_STARTED', 'GENERATION_STOPPED']) {
+        const fixture = lab({ autoSettle: false });
+        const pending = fixture.controller.requestTube();
+        assert.equal(fixture.controller.view().tube.busy, true);
+        const before = fixture.changes;
+        if (event === 'GENERATION_STARTED') await fixture.emit('GENERATION_STARTED', 'normal', {}, false);
+        else await fixture.emit('GENERATION_STOPPED');
+        assert.ok(fixture.changes > before, `${event} notifies listeners so UI clears busy state`);
+        assert.equal(fixture.controller.view().tube.busy, false);
+        fixture.failRequest(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        assert.equal(await pending, false);
+    }
+
+    const gated = lab();
+    await gated.controller.requestTube();
+    assert.equal(gated.controller.view().tube.canShake, true);
+    gated.setGenerating(true);
+    assert.equal(gated.controller.view().tube.canShake, false, 'shaking is disabled while main generation is active');
+    gated.setGenerating(false);
+
+    const toggled = lab({ autoSettle: false });
+    const pending = toggled.controller.requestTube();
+    toggled.setTubeEnabled(false);
+    toggled.settleRequest();
+    assert.equal(await pending, false, 'disabling the tube mid-flight drops the response');
+    assert.equal(toggled.tubeState.pool.length, 0);
+
+    // onChapterMarked is a safe no-op when no chat metadata is open.
+    const empty = lab();
+    empty.context.chatMetadata = null;
+    assert.doesNotThrow(() => empty.controller.onChapterMarked());
 });

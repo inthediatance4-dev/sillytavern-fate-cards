@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
+import { createFateController } from '../public/scripts/extensions/director/fate.js';
+import { messageFingerprint } from '../public/scripts/extensions/director/instruct.js';
 
 const implementation = await import('../public/scripts/plugin-runtime/host-events.js').catch(error => {
     if (error.code === 'ERR_MODULE_NOT_FOUND') return {};
@@ -223,12 +225,71 @@ test('group regeneration wrapper emits cancelable markers around the native expo
     h.context.groups = [{ id: 'group', chat_id: 'one', members: ['A.png'] }];
     h.context.chat.push({ is_user: false, mes: 'old', original_avatar: 'A.png', extra: { gen_id: 77 } });
     const seen = [];
-    h.bridge.eventSource.on(h.bridge.eventTypes.GROUP_REGENERATION_STARTED, marker => { seen.push(['start', marker.generationId]); marker.cancelled = true; });
+    h.bridge.eventSource.on(h.bridge.eventTypes.GROUP_REGENERATION_STARTED, marker => {
+        seen.push(['start', marker.groupId, marker.chatId, marker.generationId]);
+        marker.cancelled = true;
+    });
     h.bridge.eventSource.on(h.bridge.eventTypes.GROUP_REGENERATION_FINISHED, marker => seen.push(['end', marker.cancelled]));
     await h.context.SlashCommandParser.commands.regenerate.callback({ await: 'true' });
     assert.equal(h.groupCalls(), 0);
-    assert.deepEqual(seen, [['start', 77], ['end', true]]);
+    assert.deepEqual(seen, [['start', 'group', 'one', 77], ['end', true]]);
     h.bridge.dispose();
+});
+
+test('group regeneration marker ignores user/system gen_id and replays a bound Fate card through the official bridge', async () => {
+    const h = harness();
+    h.context.groupId = 'group';
+    h.context.groups = [{ id: 'group', chat_id: 'one', members: ['A.png'] }];
+    h.context.chat = [
+        { is_user: true, name: 'User', mes: 'hello', extra: { gen_id: 999 } },
+    ];
+    let lastMarker;
+    h.bridge.eventSource.on(h.bridge.eventTypes.GROUP_REGENERATION_STARTED, marker => { lastMarker = marker; marker.cancelled = true; });
+    await h.context.SlashCommandParser.commands.regenerate.callback({ await: 'true' });
+    assert.equal(lastMarker.groupId, 'group');
+    assert.equal(lastMarker.chatId, 'one');
+    assert.equal(lastMarker.generationId, null, 'user message gen_id is not treated as an AI batch generationId');
+    h.bridge.dispose();
+
+    const live = harness();
+    live.context.groupId = 'group';
+    live.context.groups = [{ id: 'group', chat_id: 'one', members: ['A.png'] }];
+    live.context.chat = [
+        { is_user: true, name: 'User', mes: 'hello' },
+        { is_user: false, name: 'A', mes: 'first turn', original_avatar: 'A.png', extra: { gen_id: 77 } },
+    ];
+    live.context.chatMetadata = {
+        director: {
+            fate: {
+                version: 1, held: null, offer: null, pity: 0, recent: [], log: [], rerolls: 1,
+                bound: {
+                    id: 'card-1', title: '意外的回声', strength: 'medium', category: 'echo', rarity: 'common',
+                    event: 'A lantern goes out.', slotIndex: 1,
+                    prevFingerprint: messageFingerprint(live.context.chat[0]),
+                    generationId: 77, batchEndIndex: 1, groupRetry: false,
+                },
+            },
+        },
+    };
+    const controller = createFateController(() => ({
+        ...live.context,
+        eventSource: live.bridge.eventSource,
+        eventTypes: live.bridge.eventTypes,
+    }), {
+        save: async () => true,
+        isGenerating: () => live.core.is_send_press,
+    });
+    let replayed = false;
+    live.group.regenerateGroup = async () => {
+        live.context.chat.pop();
+        await live.emit('MESSAGE_DELETED');
+        const requestChat = live.context.chat.map(message => ({ ...message }));
+        replayed = controller.prepare('normal', requestChat) === true;
+        return 'group result';
+    };
+    await live.context.SlashCommandParser.commands.regenerate.callback({ await: 'true' });
+    assert.equal(replayed, true, 'official group regeneration marker matches Fate controller scope and replays the bound card');
+    live.bridge.dispose();
 });
 
 test('dispose releases native subscriptions and the narrow fetch observer', () => {

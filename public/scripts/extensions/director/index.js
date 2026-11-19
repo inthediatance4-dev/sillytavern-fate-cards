@@ -309,6 +309,9 @@ async function usePreset(preset, inputText) {
             } finally {
                 context.eventSource.removeListener(context.eventTypes.MESSAGE_SENT, attachMetadata);
             }
+            if (preset.isChapter && isCurrentChat(context, revision) && context.chat[index]?.extra?.director === metadata) {
+                fateApi?.onChapterMarked?.();
+            }
         }
         if (preset.autoGenerate && isCurrentChat(context, revision)) {
             // /trigger uses Generate's group-aware path and waits for its lock.

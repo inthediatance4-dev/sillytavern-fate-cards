@@ -457,14 +457,16 @@ export function createFateController(getContext, options = {}) {
         if (!tubeEnabled()) return null;
         const context = getContext();
         const tube = state(context.chatMetadata).tube;
-        const requestBusy = tubeBusy && current(tubeBusy.snapshot);
+        const cardBusy = Boolean(busy && current(busy.snapshot));
+        const requestBusy = Boolean(tubeBusy && current(tubeBusy.snapshot));
         const unseen = tube.pool.filter(stick => !tube.seenIds.includes(stick.id)).length;
         const chatOpen = Boolean(context.chatMetadata) && Array.isArray(context.chat)
             && (isGroup(context) || context.characterId !== undefined);
+        const generating = isGenerating();
         return {
             luck: tube.luck, total: tube.pool.length, unseen, closed: tube.adoptedId !== null,
-            busy: Boolean(requestBusy), canRequest: chatOpen && !requestBusy && !busy && !isGenerating(),
-            canShake: tube.luck > 0 && unseen > 0 && tube.adoptedId === null && !requestBusy && !busy,
+            busy: requestBusy, canRequest: chatOpen && !requestBusy && !cardBusy && !generating,
+            canShake: chatOpen && tube.luck > 0 && unseen > 0 && tube.adoptedId === null && !requestBusy && !cardBusy && !generating,
             seen: tube.pool.filter(stick => tube.seenIds.includes(stick.id)).map(stick => ({
                 id: stick.id, category: stick.category, rarity: stick.rarity, text: stick.text,
                 rejected: stick.rejected === true, adopted: tube.adoptedId === stick.id,
@@ -479,9 +481,11 @@ export function createFateController(getContext, options = {}) {
 
     function abortTubeRequest() {
         if (!tubeBusy) return;
-        tubeBusy.cancelled = true;
-        tubeBusy.controller.abort();
+        const operation = tubeBusy;
+        operation.cancelled = true;
         tubeBusy = null;
+        operation.controller.abort();
+        if (current(operation.snapshot)) notify();
     }
 
     async function shake() {
@@ -541,7 +545,7 @@ export function createFateController(getContext, options = {}) {
                 signal: operation.controller.signal,
                 quietPrompt: tubeRequestPrompt({ messages: recent, rejected }),
             });
-            if (!current(snapshot) || operation.cancelled) return false;
+            if (!current(snapshot) || operation.cancelled || !tubeEnabled()) return false;
             const pool = parseTubeResponse(raw).map(stick => ({ ...stick, id: uuid() }));
             // Luck may have accrued while the request was in flight.
             const value = state(snapshot.metadata);
@@ -574,8 +578,12 @@ export function createFateController(getContext, options = {}) {
     function onChapterMarked() {
         if (!tubeEnabled()) return;
         const context = getContext();
+        if (!context.chatMetadata) return;
         const value = state(context.chatMetadata);
         if (value.tube.luck === TUBE_LUCK_MAX) return;
+        if (!context.chatMetadata.director || typeof context.chatMetadata.director !== 'object' || Array.isArray(context.chatMetadata.director)) {
+            context.chatMetadata.director = {};
+        }
         context.chatMetadata.director.fate = { ...value, tube: { ...value.tube, luck: TUBE_LUCK_MAX } };
         notify();
         context.saveMetadataDebounced?.();

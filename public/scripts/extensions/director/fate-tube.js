@@ -105,12 +105,12 @@ export function parseTubeResponse(raw) {
  * disables the button for both cases, the state refuses them regardless.
  */
 export function shakeTube(tube, random = Math.random) {
-    if (!plainObject(tube) || tube.luck < 1) return null;
+    if (!plainObject(tube) || tube.adoptedId !== null || tube.luck < 1) return null;
     const unseen = tube.pool.filter(stick => !tube.seenIds.includes(stick.id));
     if (!unseen.length) return null;
     const order = unseen.slice();
     for (let index = order.length - 1; index > 0; index--) {
-        const swap = Math.floor(random() * (index + 1));
+        const swap = Math.min(index, Math.max(0, Math.floor(random() * (index + 1))));
         [order[index], order[swap]] = [order[swap], order[index]];
     }
     const revealed = order.slice(0, TUBE_REVEAL_COUNT);

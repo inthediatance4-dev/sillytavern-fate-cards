@@ -102,6 +102,7 @@ test('adopt and reject require seen open sticks and one adoption per tube', () =
     assert.equal(tube.adoptedId, 's0');
     assert.equal(adoptTubeStick(tube, 's1'), null, 'one adoption closes the tube');
     assert.equal(rejectTubeStick(tube, 's1'), null, 'a closed tube rejects nothing new');
+    assert.equal(shakeTube(tube, () => 0), null, 'a closed tube refuses further shakes');
     let open = { ...createTubeState(), pool: pool(4), seenIds: ['s0', 's1'] };
     assert.equal(rejectTubeStick(open, 's2'), null, 'unseen sticks cannot be rejected');
     open = rejectTubeStick(open, 's0');
